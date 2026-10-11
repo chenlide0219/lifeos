@@ -1,0 +1,13 @@
+# 统一换行符：本项目在 Windows 上编辑、在 Linux 上部署运行，
+# 若 shell 脚本 / systemd 单元被检出为 CRLF，部署到服务器后会直接失效。
+* text=auto eol=lf
+
+# 二进制资源不做换行符转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.webp binary
+
+# Windows 批处理若将来加入，必须保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
