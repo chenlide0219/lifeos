@@ -10,6 +10,33 @@ export class ValidationError extends Error {
   }
 }
 
+/**
+ * 支持的币种白名单。
+ *
+ * 只校验"3 位大写字母"会放过 RMB、US 这类常见错写，而错误币种会让金额分组与
+ * 人民币汇总**静默失真**。手动录入、CSV 导入必须共用同一份白名单，
+ * 否则会出现"API 拒绝、CSV 放行"的不一致，脏数据照样进账本。
+ */
+export const SUPPORTED_CURRENCIES = new Set([
+  'CNY', 'USD', 'EUR', 'JPY', 'GBP', 'HKD', 'TWD', 'SGD', 'AUD', 'CAD',
+  'KRW', 'INR', 'RUB', 'CHF', 'NZD', 'THB', 'MYR', 'VND', 'PHP', 'IDR',
+]);
+
+export function isSupportedCurrency(value: string): boolean {
+  const currency = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(currency) && SUPPORTED_CURRENCIES.has(currency);
+}
+
+export function assertCurrency(value: string): string {
+  const currency = value.trim().toUpperCase();
+  if (!isSupportedCurrency(currency)) {
+    throw new ValidationError(
+      `不支持的币种「${value}」，请使用标准代码（如 CNY、USD、JPY）；注意人民币是 CNY 而不是 RMB`,
+    );
+  }
+  return currency;
+}
+
 export function reqString(value: unknown, field: string, max = 200): string {
   if (typeof value !== 'string') throw new ValidationError(`${field}必须是字符串`);
   const trimmed = value.trim();

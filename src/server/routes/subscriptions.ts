@@ -21,6 +21,7 @@ import {
 } from '../lib/billing';
 import { todayInTz } from '../lib/time';
 import {
+  assertCurrency,
   optBoolean,
   optDateString,
   optString,
@@ -58,26 +59,6 @@ const SUB_FIELDS = {
 
 const PERIODS: BillingPeriod[] = ['monthly', 'quarterly', 'yearly', 'custom_days', 'lifetime'];
 const STATUSES = ['trial', 'active', 'paused', 'auto_renew_off', 'ended'] as const;
-
-/**
- * 支持的币种白名单。
- * 只校验"3 位大写字母"会放过 RMB、US 这类常见错写，而错误币种会让金额分组与
- * 人民币汇总静默失真，因此这里用受控列表。
- */
-const SUPPORTED_CURRENCIES = new Set([
-  'CNY', 'USD', 'EUR', 'JPY', 'GBP', 'HKD', 'TWD', 'SGD', 'AUD', 'CAD',
-  'KRW', 'INR', 'RUB', 'CHF', 'NZD', 'THB', 'MYR', 'VND', 'PHP', 'IDR',
-]);
-
-function assertCurrency(value: string): string {
-  const currency = value.toUpperCase();
-  if (!/^[A-Z]{3}$/.test(currency) || !SUPPORTED_CURRENCIES.has(currency)) {
-    throw new ValidationError(
-      `不支持的币种「${value}」，请使用标准代码（如 CNY、USD、JPY）；注意人民币是 CNY 而不是 RMB`,
-    );
-  }
-  return currency;
-}
 
 function toConfig(row: Record<string, unknown>): BillingConfig {
   return {
