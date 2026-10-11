@@ -205,6 +205,108 @@ export type TaskInput = {
   source?: 'manual' | 'voice';
 };
 
+export type SubscriptionDto = {
+  id: string;
+  name: string;
+  planName: string | null;
+  status: string;
+  price: string | null;
+  currency: string;
+  billingPeriod: string;
+  billingIntervalDays: number | null;
+  anchorDate: string | null;
+  nextBillingDate: string | null;
+  serviceEndDate: string | null;
+  autoRenew: boolean;
+  paymentChannel: string | null;
+  category: string | null;
+  note: string | null;
+  /** 按当前周期折算的月均；终身订阅为 null */
+  monthlyEquivalent?: string | null;
+};
+
+export type ExpectedBillDto = {
+  id: string;
+  subscriptionId: string;
+  subscriptionName?: string | null;
+  plannedDate: string;
+  amount: string;
+  currency: string;
+  /** expected | confirmed | skipped | cancelled */
+  status: string;
+  generatedBy: string;
+  note: string | null;
+};
+
+export type PaymentDto = {
+  id: string;
+  subscriptionId: string | null;
+  subscriptionName?: string | null;
+  paidAt: string;
+  amount: string;
+  currency: string;
+  isRefund: boolean;
+  fxRate: string | null;
+  fxRateSource: string | null;
+  cnyAmount: string | null;
+  isEstimatedFx: boolean;
+  paymentChannel: string | null;
+  note: string | null;
+};
+
+export type SubscriptionInput = {
+  name: string;
+  price?: string | null;
+  currency?: string;
+  billingPeriod?: string;
+  billingIntervalDays?: number | null;
+  anchorDate?: string | null;
+  serviceEndDate?: string | null;
+  autoRenew?: boolean;
+  status?: string;
+  planName?: string | null;
+  paymentChannel?: string | null;
+  category?: string | null;
+  note?: string | null;
+};
+
+export type PaymentInput = {
+  paidAt?: string;
+  amount: string;
+  currency?: string;
+  subscriptionId?: string | null;
+  isRefund?: boolean;
+  fxRate?: string | null;
+  fxRateSource?: string | null;
+  isEstimatedFx?: boolean;
+  paymentChannel?: string | null;
+  note?: string | null;
+};
+
+export type SubscriptionDetail = {
+  subscription: SubscriptionDto;
+  expectedBills: ExpectedBillDto[];
+  priceHistory: { id: string; price: string; currency: string; effectiveFrom: string; note: string | null }[];
+  payments: PaymentDto[];
+};
+
+export type SubscriptionsSummary = {
+  expected: { monthlyByCurrency: Record<string, number>; monthlyTotalNote: string };
+  actual: { currency: string; gross: string; refunds: string; net: string; count: number }[];
+  upcoming: { id: string; name: string; date: string; amount: string; currency: string }[];
+  subscriptions: number;
+  expectedMonthly: string;
+  today: string;
+};
+
+export type AnalyticsSummary = {
+  range: { from: string; to: string };
+  expected: { currency: string; amount: string; count: number }[];
+  actualNet: { currency: string; gross: string; refunds: string; net: string; count: number }[];
+  byMonth: { month: string; currency: string; net: string }[];
+  disclaimer: string;
+};
+
 export const api = {
   login: (username: string, password: string) =>
     request<AuthResponse>('/auth/login', { method: 'POST', body: { username, password } }),
@@ -299,5 +401,57 @@ export const api = {
         method: 'POST',
         body: { text },
       }),
+  },
+
+  subscriptions: {
+    list: () => request<{ subscriptions: SubscriptionDto[] }>('/subscriptions'),
+    summary: () => request<SubscriptionsSummary>('/subscriptions/summary'),
+    detail: (id: string) => request<SubscriptionDetail>(`/subscriptions/${id}`),
+    create: (input: SubscriptionInput) =>
+      request<{ subscription: SubscriptionDto }>('/subscriptions', { method: 'POST', body: input }),
+    update: (id: string, input: Partial<SubscriptionInput>) =>
+      request<{ subscription: SubscriptionDto }>(`/subscriptions/${id}`, { method: 'PATCH', body: input }),
+    remove: (id: string) => request<{ ok: boolean }>(`/subscriptions/${id}`, { method: 'DELETE' }),
+
+    bills: (status?: string) =>
+      request<{ bills: ExpectedBillDto[] }>(
+        `/subscriptions/bills/list${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+      ),
+
+    /** 唯一能把「预计」变成「实付」的入口 */
+    confirmBill: (
+      id: string,
+      input: { paidAt?: string; amount?: string; currency?: string; paymentChannel?: string | null; note?: string | null },
+    ) =>
+      request<{ payment: PaymentDto; bill: ExpectedBillDto }>(`/subscriptions/bills/${id}/confirm`, {
+        method: 'POST',
+        body: input,
+      }),
+
+    skipBill: (id: string) =>
+      request<{ bill: ExpectedBillDto }>(`/subscriptions/bills/${id}/skip`, { method: 'POST' }),
+
+    payments: (range: { from?: string; to?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (range.from) query.set('from', range.from);
+      if (range.to) query.set('to', range.to);
+      const suffix = query.toString();
+      return request<{ payments: PaymentDto[] }>(`/subscriptions/payments/list${suffix ? `?${suffix}` : ''}`);
+    },
+
+    /** 手动记账：不依赖预计账单 */
+    createPayment: (input: PaymentInput) =>
+      request<{ payment: PaymentDto }>('/subscriptions/payments', { method: 'POST', body: input }),
+
+    refund: (id: string, input: { amount?: string; paidAt?: string; note?: string | null }) =>
+      request<{ refund: PaymentDto }>(`/subscriptions/payments/${id}/refund`, { method: 'POST', body: input }),
+
+    analytics: (range: { from?: string; to?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (range.from) query.set('from', range.from);
+      if (range.to) query.set('to', range.to);
+      const suffix = query.toString();
+      return request<AnalyticsSummary>(`/subscriptions/analytics/summary${suffix ? `?${suffix}` : ''}`);
+    },
   },
 };
