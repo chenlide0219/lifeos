@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { and, eq, gte, isNotNull, lte, ne } from 'drizzle-orm';
 import { db } from '../db/client';
-import { events, tasks } from '../db/schema';
+import { events, expectedBills, subscriptions, tasks } from '../db/schema';
 import { instantToDateString, instantToTimeString } from '../lib/time';
 import { ValidationError, optQueryInstant } from '../lib/validate';
 import { requireAuth, type AppEnv } from '../middleware/auth';
@@ -116,8 +116,93 @@ calendarRoutes.get('/', requireAuth, async (c) =>
       });
     }
 
-    // 订阅生成的续费/到期条目在阶段 4 接入，届时同样只做读视图聚合，
-    // 不复制成 Event —— 以免同一事实存在两份数据。
+    // 订阅生成的续费/到期条目。
+    // 关键：这里聚合的是**读视图**，不把订阅事项复制成 Event ——
+    // 同一事实存在两份数据必然不一致（PRD FR-04）。
+    const subscriptionItems = await db
+      .select({
+        id: expectedBills.id,
+        subscriptionId: expectedBills.subscriptionId,
+        name: subscriptions.name,
+        plannedDate: expectedBills.plannedDate,
+        amount: expectedBills.amount,
+        currency: expectedBills.currency,
+        billStatus: expectedBills.status,
+        autoRenew: subscriptions.autoRenew,
+        serviceEndDate: subscriptions.serviceEndDate,
+        subStatus: subscriptions.status,
+      })
+      .from(expectedBills)
+      .innerJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
+      .where(
+        and(
+          gte(expectedBills.plannedDate, fromDate),
+          lte(expectedBills.plannedDate, toDate),
+          // 已取消的账单不进日历；已确认/已跳过的仍显示（历史事实）
+          ne(expectedBills.status, 'cancelled'),
+        ),
+      )
+      .orderBy(expectedBills.plannedDate)
+      .limit(500);
+
+    for (const s of subscriptionItems) {
+      items.push({
+        type: 'subscription',
+        id: s.id,
+        title: `${s.name} 续费`,
+        start: `${s.plannedDate}T00:00:00`,
+        end: null,
+        date: s.plannedDate,
+        time: null,
+        // 扣费日是"日历日期"，不是某个时刻，因此按全天处理，不当作 UTC 午夜
+        allDay: true,
+        status: s.billStatus,
+        inactive: s.billStatus !== 'expected',
+        meta: {
+          subscriptionId: s.subscriptionId,
+          amount: s.amount,
+          currency: s.currency,
+          // 自动续费关闭时给出到期提示，避免误以为还会自动扣费
+          autoRenew: s.autoRenew,
+          note: s.autoRenew ? '预计扣费' : '已关闭自动续费，仅为预计扣费日',
+        },
+      });
+    }
+
+    // 服务到期日本身也是重要日期（尤其是已关闭自动续费的订阅）
+    const endingSubs = await db
+      .select({
+        id: subscriptions.id,
+        name: subscriptions.name,
+        serviceEndDate: subscriptions.serviceEndDate,
+        autoRenew: subscriptions.autoRenew,
+      })
+      .from(subscriptions)
+      .where(
+        and(
+          isNotNull(subscriptions.serviceEndDate),
+          gte(subscriptions.serviceEndDate, fromDate),
+          lte(subscriptions.serviceEndDate, toDate),
+          ne(subscriptions.status, 'ended'),
+        ),
+      )
+      .limit(200);
+
+    for (const s of endingSubs) {
+      items.push({
+        type: 'subscription',
+        id: `end:${s.id}`,
+        title: `${s.name} ${s.autoRenew ? '本期到期' : '服务到期'}`,
+        start: `${s.serviceEndDate}T00:00:00`,
+        end: null,
+        date: s.serviceEndDate!,
+        time: null,
+        allDay: true,
+        status: 'service_end',
+        inactive: false,
+        meta: { subscriptionId: s.id, autoRenew: s.autoRenew, note: '服务到期日' },
+      });
+    }
 
     items.sort((a, b) => (a.date === b.date ? a.start.localeCompare(b.start) : a.date.localeCompare(b.date)));
 
