@@ -15,6 +15,7 @@ import { eventRoutes } from './routes/events';
 import { healthRoutes } from './routes/health';
 import { notificationRoutes } from './routes/notifications';
 import { statusRoutes } from './routes/status';
+import { subscriptionRoutes } from './routes/subscriptions';
 import { taskRoutes } from './routes/tasks';
 import { voiceRoutes } from './routes/voice';
 
@@ -57,6 +58,7 @@ export function createApp(): Hono {
   api.route('/tasks', taskRoutes);
   api.route('/calendar', calendarRoutes);
   api.route('/voice', voiceRoutes);
+  api.route('/subscriptions', subscriptionRoutes);
 
   app.route('/api', api);
 

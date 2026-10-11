@@ -121,8 +121,9 @@ export function generateExpectedBills(
   const anchor = config.nextBillingDate ?? config.anchorDate;
   if (!anchor) return [];
 
-  // 自动续费关闭：服务到期日之后不再产生任何扣费
-  const stopAt = !config.autoRenew ? config.serviceEndDate : config.serviceEndDate ?? null;
+  // 只有**自动续费关闭**时，服务到期日才是扣费的终点（PRD FR-04）。
+  // 自动续费开启时，到期日只表示"已付到哪天"，不应截断后续扣费。
+  const stopAt = config.autoRenew ? null : config.serviceEndDate;
   if (!config.autoRenew && !stopAt) return [];
 
   const horizonEnd = addMonthsClamped(from, horizonMonths);
