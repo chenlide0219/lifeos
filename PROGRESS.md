@@ -459,3 +459,35 @@ sudo bash deploy/verify.sh → 线上 31 通过 / 0 失败 / 2 提示
 - 手动汇率折算结果标记 `isEstimatedFx`，不得伪装为精确金额（PRD FR-06）；
 - 取不到就**如实留空，绝不编造汇率**；非法值（0 / 负数 / 超大 / 非数字）一律拒绝；
 - 6 小时缓存，避免重复打上游。
+
+## 被回滚代码的恢复路径（不必重写）
+
+那份汇率模块**没有丢失**——它仍在服务器上：
+
+```
+/opt/lifeos/src/server/lib/fx.ts                      # 模块（仍在）
+/opt/lifeos/src/server/routes/subscriptions.ts         # 接线版本（仍在）
+/opt/lifeos/tests/unit/fx.test.ts                      # 测试（仍在）
+```
+
+SSH 恢复后直接 `tar czf - src/server/lib/fx.ts src/server/routes/subscriptions.ts tests/unit/fx.test.ts`
+取回即可，无需重写。**注意**：取回后先跑单文件测试定位失败，再决定是修好接线还是只保留模块。
+
+## 排查线索（基于离线推理，未经验证）
+
+全套件 173 项中 3 项失败。按代码逐条推演，`fx.test.ts` 的 12 个用例与
+`resolveCnyAmount` 的分支逻辑我认为都应当通过，因此更可能的失败点是：
+
+1. **断言 `calls.length` 的三个用例**（缓存命中=1、手动汇率不发请求=0、手动汇率非法回退=1）
+   —— 若 `globalThis.fetch` 的替换与模块级 `calls` 绑定存在跨用例残留，这三个会同时失败，
+   数量恰好是 3。**这是首要怀疑对象**。
+2. 其次是 `subscriptions.test.ts` 受接线影响：人民币付款的 `cnyAmount` 由 `null` 变为
+   实际金额（行为改变），若有断言依赖旧值则会失败。
+
+定位命令（SSH 恢复后第一件事）：
+
+```bash
+cd /opt/lifeos && sudo -E node --import tsx --test tests/unit/fx.test.ts
+```
+
+**不要跳过这一步直接重新部署。**
