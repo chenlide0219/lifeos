@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --canvas: 247 248 251;
+    --surface: 255 255 255;
+    --line: 226 232 240;
+    --ink: 15 23 42;
+    --muted: 100 116 139;
+  }
+
+  .dark {
+    --canvas: 9 12 20;
+    --surface: 18 23 34;
+    --line: 38 45 60;
+    --ink: 226 232 240;
+    --muted: 148 163 184;
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  /* 尊重用户的减少动效偏好（PRD 3.2：避免花哨动画） */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-line;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-surface shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-4 py-2.5
+           text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand text-white hover:bg-brand-hover;
+  }
+
+  .btn-ghost {
+    @apply btn border border-line bg-surface text-ink hover:bg-canvas;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink
+           placeholder:text-muted/70 focus:border-brand focus:outline-none focus:ring-2
+           focus:ring-brand/20 disabled:opacity-60;
+  }
+
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-ink;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted
+           transition-colors hover:bg-canvas hover:text-ink;
+  }
+
+  .nav-item-active {
+    @apply bg-brand/10 text-brand hover:bg-brand/10 hover:text-brand;
+  }
+}

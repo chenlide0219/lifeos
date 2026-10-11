@@ -1,0 +1,43 @@
+{
+  "name": "lifeos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Life OS V1 - 个人生活与事务管理工作站",
+  "scripts": {
+    "start:api": "tsx src/server/index.ts",
+    "start:worker": "tsx src/worker/index.ts",
+    "dev:api": "tsx watch src/server/index.ts",
+    "dev:worker": "tsx watch src/worker/index.ts",
+    "build:web": "vite build",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "create-admin": "tsx src/scripts/create-admin.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@node-rs/argon2": "^2.0.2",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.38.3",
+    "hono": "^4.6.14",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "drizzle-kit": "^0.30.1",
+    "postcss": "^8.4.49",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.1",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

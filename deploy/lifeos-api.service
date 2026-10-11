@@ -1,0 +1,41 @@
+[Unit]
+Description=Life OS API Server
+Documentation=https://life.o2lin1.com
+After=network-online.target postgresql@16-main.service
+Wants=network-online.target
+Requires=postgresql@16-main.service
+
+[Service]
+Type=simple
+User=lifeos
+Group=lifeos
+WorkingDirectory=/opt/lifeos
+EnvironmentFile=/opt/lifeos/.env
+Environment=NODE_ENV=production
+ExecStart=/opt/lifeos/node_modules/.bin/tsx /opt/lifeos/src/server/index.ts
+
+Restart=always
+RestartSec=5
+# 1GB 内存的机器上给应用设上限，避免挤垮同机的既有业务
+MemoryMax=320M
+MemoryHigh=256M
+# 关闭核心转储：里面可能含密钥
+LimitCORE=0
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lifeos-api
+
+# 加固：应用不需要写文件系统，也不需要任何特权
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
