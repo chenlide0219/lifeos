@@ -9,6 +9,7 @@ import {
   type SubscriptionsSummary,
 } from '../api';
 import { IconPlus, IconSubscription } from '../components/Icons';
+import { CsvImportDialog } from '../components/CsvImport';
 import { Alert, Card, EmptyState, PageHeader, Spinner } from '../components/ui';
 
 const PERIOD_LABEL: Record<string, string> = {
@@ -51,6 +52,7 @@ export function SubscriptionsPage() {
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Partial<SubscriptionDto> | null>(null);
   const [busy, setBusy] = useState(false);
+  const [csvOpen, setCsvOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -210,12 +212,19 @@ export function SubscriptionsPage() {
         title="订阅"
         description="档案、计费周期与到期日期；预计账单与实付严格分开"
         action={
-          <button type="button" className="btn-primary" onClick={() => setEditing({ currency: 'CNY', billingPeriod: 'monthly', autoRenew: true, status: 'active', anchorDate: today() })}>
-            <IconPlus width={18} height={18} />
-            新增订阅
-          </button>
+          <div className="flex gap-2">
+            <button type="button" className="btn-ghost" onClick={() => setCsvOpen(true)}>
+              导入 CSV
+            </button>
+            <button type="button" className="btn-primary" onClick={() => setEditing({ currency: 'CNY', billingPeriod: 'monthly', autoRenew: true, status: 'active', anchorDate: today() })}>
+              <IconPlus width={18} height={18} />
+              新增订阅
+            </button>
+          </div>
         }
       />
+
+      <CsvImportDialog open={csvOpen} onClose={() => setCsvOpen(false)} onImported={() => void load()} />
 
       {error ? <div className="mb-4"><Alert>{error}</Alert></div> : null}
       {notice ? <div className="mb-4"><Alert tone="info">{notice}</Alert></div> : null}

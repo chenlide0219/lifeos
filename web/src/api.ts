@@ -11,6 +11,9 @@ export class ApiError extends Error {
   }
 }
 
+/** 供需要直接调用接口的组件使用（如 CSV 导入的动态预览） */
+export const requestRaw = request;
+
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
