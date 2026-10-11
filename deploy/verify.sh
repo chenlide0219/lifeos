@@ -159,6 +159,35 @@ else
 fi
 
 printf '\n════════════════════════════════════════════════\n'
+# ── 10. 密钥不得出现在前端构建产物（PRD FR-01 验收项）──────────
+head2 '前端构建产物不含密钥'
+DIST=/opt/lifeos/dist/web
+if [ -d "$DIST" ]; then
+  leaks=0
+  checked=0
+  while IFS= read -r line; do
+    case "$line" in
+      MIMO_API_KEY=*|DEEPSEEK_API_KEY=*|SESSION_SECRET=*|ILINK_TOKEN=*|ILINK_CONTEXT_TOKEN=*)
+        value="${line#*=}"
+        [ -z "$value" ] && continue
+        checked=$((checked + 1))
+        if grep -rqF "$value" "$DIST" 2>/dev/null; then
+          bad "构建产物中出现密钥（来自 ${line%%=*}）"
+          leaks=$((leaks + 1))
+        fi
+        ;;
+    esac
+  done < <(grep -E '^(MIMO_API_KEY|DEEPSEEK_API_KEY|SESSION_SECRET|ILINK_TOKEN|ILINK_CONTEXT_TOKEN)=' /opt/lifeos/.env 2>/dev/null)
+  [ "$leaks" -eq 0 ] && ok "已核查 $checked 个密钥值，均未出现在前端构建产物中"
+  if grep -rqE 'postgresql://|DATABASE_URL' "$DIST" 2>/dev/null; then
+    bad '构建产物中出现数据库连接串'
+  else
+    ok '构建产物中无数据库连接串'
+  fi
+else
+  bad "找不到前端构建产物目录 $DIST"
+fi
+
 printf '线上自检结果：%d 通过 / %d 失败 / %d 提示\n' "$pass" "$fail" "$warn"
 printf '════════════════════════════════════════════════\n'
 [ "$fail" -eq 0 ]
