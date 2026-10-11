@@ -58,10 +58,12 @@ export type ExpectedBillStatus = 'expected' | 'confirmed' | 'skipped' | 'cancell
 export type AiDraft = {
   kind: 'event' | 'task';
   title: string;
+  /** 事件开始/结束：ISO 8601 带时区偏移 */
   start_at: string | null;
   end_at: string | null;
-  due_at: string | null;
+  /** 待办的截止日期与时刻分开存，禁止把全天项目当成 UTC 午夜 */
   due_date: string | null;
+  due_time: string | null;
   location: string | null;
   note: string | null;
   reminder_enabled: boolean;

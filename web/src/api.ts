@@ -1,4 +1,4 @@
-import type { AuthResponse, HealthResponse } from '@shared/types';
+import type { AiDraft, AuthResponse, HealthResponse } from '@shared/types';
 
 export class ApiError extends Error {
   constructor(
@@ -276,5 +276,28 @@ export const api = {
         `/calendar?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`,
       ),
     overview: () => request<OverviewResponse>('/calendar/overview'),
+  },
+
+  voice: {
+    status: () =>
+      request<{
+        asr: { configured: boolean; model: string };
+        llm: { configured: boolean; model: string };
+        limits: { maxAudioBytes: number };
+      }>('/voice/status'),
+
+    /** 音频以 base64 上传；服务端只在内存中处理，不落盘 */
+    transcribe: (audio: string, format: 'wav' | 'mp3') =>
+      request<{ text: string; seconds: number | null; model: string }>('/voice/transcribe', {
+        method: 'POST',
+        body: { audio, format },
+      }),
+
+    /** 只返回草稿，不落库；确认创建由 events/tasks 接口完成 */
+    parse: (text: string) =>
+      request<{ draft: AiDraft; persisted: boolean; timezone: string }>('/voice/parse', {
+        method: 'POST',
+        body: { text },
+      }),
   },
 };

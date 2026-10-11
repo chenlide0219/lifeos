@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../hooks/useTheme';
+import { VoiceCapture } from './VoiceCapture';
 import {
   IconAnalytics,
   IconCalendar,
@@ -54,6 +56,7 @@ export function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const current = NAV.find((item) => item.to === location.pathname);
+  const [voiceOpen, setVoiceOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-canvas">
@@ -131,15 +134,21 @@ export function Layout() {
       {/* ── 移动端麦克风快捷入口（PRD 3.2） ── */}
       <button
         type="button"
-        disabled
-        title="语音录入（阶段 3 接入）"
+        onClick={() => setVoiceOpen(true)}
+        title="语音录入"
         aria-label="语音录入"
         className="fixed bottom-24 right-4 z-30 flex h-14 w-14 items-center justify-center rounded-2xl
                    bg-brand text-white shadow-pop transition-transform active:scale-95
-                   disabled:cursor-not-allowed disabled:opacity-70 md:bottom-8 md:right-8"
+                   md:bottom-8 md:right-8"
       >
         <IconMic width={24} height={24} />
       </button>
+
+      <VoiceCapture
+        open={voiceOpen}
+        onClose={() => setVoiceOpen(false)}
+        onCreated={() => setVoiceOpen(false)}
+      />
 
       {/* ── 移动端底部导航 ── */}
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
