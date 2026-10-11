@@ -117,6 +117,94 @@ export type NotificationJobsResponse = {
   providerReady: boolean;
 };
 
+export type ReminderResult = {
+  created: number;
+  resurrected: number;
+  cancelled: number;
+  /** 创建时已经过去、按政策不补发的提醒数 */
+  skippedPast: number;
+  /** 已发送过、为避免重复送达而保留不动的提醒数 */
+  skippedSent: number;
+  ruleEnabled: boolean;
+};
+
+export type EventDto = {
+  id: string;
+  title: string;
+  startAt: string;
+  endAt: string | null;
+  location: string | null;
+  note: string | null;
+  status: string;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskDto = {
+  id: string;
+  title: string;
+  dueDate: string | null;
+  dueTime: string | null;
+  status: string;
+  completedAt: string | null;
+  note: string | null;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CalendarItemDto = {
+  type: 'event' | 'task' | 'subscription';
+  id: string;
+  title: string;
+  start: string;
+  end: string | null;
+  date: string;
+  time: string | null;
+  allDay: boolean;
+  status: string;
+  inactive: boolean;
+  meta: Record<string, unknown>;
+};
+
+export type CalendarResponse = {
+  items: CalendarItemDto[];
+  counts: Record<string, number>;
+  range: { from: string; to: string; fromDate: string; toDate: string };
+};
+
+export type OverviewResponse = {
+  today: string;
+  horizonDate: string;
+  events: { id: string; title: string; startAt: string; date: string; time: string; location: string | null }[];
+  tasksDueToday: { id: string; title: string; dueDate: string | null; dueTime: string | null }[];
+  tasksDueTodayCount: number;
+};
+
+export type TaskView = 'inbox' | 'today' | 'upcoming' | 'done';
+
+export type EventInput = {
+  title: string;
+  startAt: string;
+  endAt?: string | null;
+  location?: string | null;
+  note?: string | null;
+  reminderEnabled?: boolean;
+  reminderOffsets?: number[];
+  source?: 'manual' | 'voice';
+};
+
+export type TaskInput = {
+  title: string;
+  dueDate?: string | null;
+  dueTime?: string | null;
+  note?: string | null;
+  reminderEnabled?: boolean;
+  reminderOffsets?: number[];
+  source?: 'manual' | 'voice';
+};
+
 export const api = {
   login: (username: string, password: string) =>
     request<AuthResponse>('/auth/login', { method: 'POST', body: { username, password } }),
@@ -142,5 +230,51 @@ export const api = {
     if (params.offset) query.set('offset', String(params.offset));
     const suffix = query.toString();
     return request<NotificationJobsResponse>(`/notifications/jobs${suffix ? `?${suffix}` : ''}`);
+  },
+
+  events: {
+    list: (range: { from?: string; to?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (range.from) query.set('from', range.from);
+      if (range.to) query.set('to', range.to);
+      const suffix = query.toString();
+      return request<{ events: EventDto[] }>(`/events${suffix ? `?${suffix}` : ''}`);
+    },
+    create: (input: EventInput) =>
+      request<{ event: EventDto; reminder: ReminderResult }>('/events', { method: 'POST', body: input }),
+    update: (id: string, input: Partial<EventInput>) =>
+      request<{ event: EventDto; reminder: ReminderResult }>(`/events/${id}`, {
+        method: 'PATCH',
+        body: input,
+      }),
+    cancel: (id: string) =>
+      request<{ event: EventDto; reminder: ReminderResult }>(`/events/${id}/cancel`, { method: 'POST' }),
+    remove: (id: string) => request<{ ok: boolean }>(`/events/${id}`, { method: 'DELETE' }),
+  },
+
+  tasks: {
+    list: (view: TaskView) => request<{ tasks: TaskDto[]; view: TaskView; today: string }>(`/tasks?view=${view}`),
+    counts: () =>
+      request<{ counts: Record<TaskView, number>; today: string }>('/tasks/counts'),
+    create: (input: TaskInput) =>
+      request<{ task: TaskDto; reminder: ReminderResult }>('/tasks', { method: 'POST', body: input }),
+    update: (id: string, input: Partial<TaskInput>) =>
+      request<{ task: TaskDto; reminder: ReminderResult }>(`/tasks/${id}`, {
+        method: 'PATCH',
+        body: input,
+      }),
+    complete: (id: string) =>
+      request<{ task: TaskDto; reminder: ReminderResult }>(`/tasks/${id}/complete`, { method: 'POST' }),
+    reopen: (id: string) =>
+      request<{ task: TaskDto; reminder: ReminderResult }>(`/tasks/${id}/reopen`, { method: 'POST' }),
+    remove: (id: string) => request<{ ok: boolean }>(`/tasks/${id}`, { method: 'DELETE' }),
+  },
+
+  calendar: {
+    range: (range: { from: string; to: string }) =>
+      request<CalendarResponse>(
+        `/calendar?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`,
+      ),
+    overview: () => request<OverviewResponse>('/calendar/overview'),
   },
 };
