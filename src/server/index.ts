@@ -1,5 +1,5 @@
 import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { config } from './config';
@@ -7,6 +7,7 @@ import { pool } from './db/client';
 import { cleanupExpiredSessions } from './lib/session';
 import { authRoutes } from './routes/auth';
 import { healthRoutes } from './routes/health';
+import { notificationRoutes } from './routes/notifications';
 import { statusRoutes } from './routes/status';
 
 const app = new Hono();
@@ -22,16 +23,31 @@ app.use(
   }),
 );
 
+function applyNoStore(c: Context): void {
+  c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+  c.header('Pragma', 'no-cache');
+  c.header('Expires', '0');
+}
+
 const api = new Hono();
+
+/**
+ * API 一律不缓存，防止代理或浏览器缓存登录态响应。
+ *
+ * 必须注册在路由**之前**：Hono 按注册顺序匹配，注册在路由之后的中间件
+ * 不会被已匹配的路由执行，原先的写法因此完全没有生效。
+ * 前后各写一次：前一次保证未捕获异常/404 等响应也带上，后一次覆盖处理器的自有设置。
+ */
+api.use('*', async (c, next) => {
+  applyNoStore(c);
+  await next();
+  applyNoStore(c);
+});
+
 api.route('/health', healthRoutes);
 api.route('/auth', authRoutes);
 api.route('/status', statusRoutes);
-
-// API 一律不缓存，防止代理缓存登录态响应
-api.use('*', async (c, next) => {
-  await next();
-  c.header('Cache-Control', 'no-store');
-});
+api.route('/notifications', notificationRoutes);
 
 app.route('/api', api);
 

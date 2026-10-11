@@ -9,11 +9,15 @@
     "start:worker": "tsx src/worker/index.ts",
     "dev:api": "tsx watch src/server/index.ts",
     "dev:worker": "tsx watch src/worker/index.ts",
+    "dev:web": "vite",
     "build:web": "vite build",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/scripts/migrate.ts",
     "create-admin": "tsx src/scripts/create-admin.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx tests/run.ts",
+    "test:unit": "node --import tsx --test tests/unit/*.test.ts",
+    "test:verify": "bash deploy/verify.sh"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

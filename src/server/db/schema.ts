@@ -6,6 +6,7 @@
  * - 日期型数据（全天待办、订阅扣费日）用 date，**不**当作 UTC 午夜处理。
  * - 金额一律 numeric(DECIMAL)，禁止二进制浮点。
  */
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   date,
@@ -25,13 +26,21 @@ import {
 
 /* ────────────────────────── 账户与会话 ────────────────────────── */
 
-export const adminUsers = pgTable('admin_users', {
-  id: serial('id').primaryKey(),
-  username: varchar('username', { length: 64 }).notNull().unique(),
-  passwordHash: text('password_hash').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const adminUsers = pgTable(
+  'admin_users',
+  {
+    id: serial('id').primaryKey(),
+    username: varchar('username', { length: 64 }).notNull().unique(),
+    passwordHash: text('password_hash').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  () => [
+    // 单管理员是产品不变量（PRD 第 2 节：仅本人、不开放注册、不做多租户）。
+    // 用常量表达式唯一索引在数据库层强制"至多一行"，使任何代码路径都无法造出第二个管理员。
+    uniqueIndex('admin_users_singleton_uq').on(sql`(true)`),
+  ],
+);
 
 export const sessions = pgTable(
   'sessions',
@@ -265,6 +274,13 @@ export const notificationJobs = pgTable(
     fireAt: timestamp('fire_at', { withTimezone: true }).notNull(),
     /** pending | sending | sent | failed | cancelled | skipped | missed */
     status: varchar('status', { length: 16 }).notNull().default('pending'),
+    /**
+     * 失败类别，供界面区分"需要人工核实"与"可直接放弃"：
+     * retryable | rejected | needs_human | unknown | exhausted
+     * unknown 表示无法确认下游是否已接受（HTTP 200 但无可靠回执、超时、发送中中断），
+     * 按政策不自动重发，需人工核实手机是否已收到。
+     */
+    failureKind: varchar('failure_kind', { length: 16 }),
     /** 幂等键：防止并发调度重复投递 */
     idempotencyKey: text('idempotency_key').notNull().unique(),
     attempts: integer('attempts').notNull().default(0),

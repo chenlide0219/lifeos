@@ -61,7 +61,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 export type ProviderStatusDto = {
   channel: string;
   name: string;
+  /** 凭据是否齐备 */
   configured: boolean;
+  /** 最近一次只读探测是否可达；null 表示尚未探测 */
+  reachable: boolean | null;
+  probedAt: string | null;
   detail: string;
 };
 
@@ -75,6 +79,42 @@ export type SystemStatusResponse = {
     llm: { configured: boolean; model: string; baseUrl: string };
   };
   notifications: ProviderStatusDto[];
+  providersProbedAt: string;
+};
+
+export type NotificationJobStatus =
+  | 'pending'
+  | 'sending'
+  | 'sent'
+  | 'failed'
+  | 'cancelled'
+  | 'skipped'
+  | 'missed';
+
+export type NotificationJobDto = {
+  id: string;
+  subjectType: string;
+  subjectId: string;
+  title: string;
+  status: NotificationJobStatus;
+  /** retryable | rejected | needs_human | unknown | exhausted */
+  failureKind: string | null;
+  fireAt: string;
+  sentAt: string | null;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  nextAttemptAt: string | null;
+  createdAt: string;
+};
+
+export type NotificationJobsResponse = {
+  jobs: NotificationJobDto[];
+  summary: Record<string, number>;
+  total: number;
+  limit: number;
+  offset: number;
+  providerReady: boolean;
 };
 
 export const api = {
@@ -94,4 +134,13 @@ export const api = {
   health: () => request<HealthResponse>('/health'),
 
   status: () => request<SystemStatusResponse>('/status'),
+
+  notificationJobs: (params: { status?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status) query.set('status', params.status);
+    if (params.limit) query.set('limit', String(params.limit));
+    if (params.offset) query.set('offset', String(params.offset));
+    const suffix = query.toString();
+    return request<NotificationJobsResponse>(`/notifications/jobs${suffix ? `?${suffix}` : ''}`);
+  },
 };

@@ -1,244 +1,52 @@
 /**
- * Life OS 通知 Worker（PRD FR-07）
+ * Life OS 通知 Worker 入口。
  *
- * 设计要点：
- * - 任务全部持久化在 notification_jobs，不依赖浏览器或个人电脑常开；
- * - 单实例由 PostgreSQL 咨询锁保证，任务领取用 FOR UPDATE SKIP LOCKED + 租约，
- *   并发下不会重复调度；
- * - 失败指数退避，最多 max_attempts 次；
- * - 严重超时未发（服务中断期间错过）的任务标记为 missed，不补发、不轰炸；
- * - 下游渠道未配置时不消费任务，保持 pending，既不丢也不伪造送达。
+ * 只负责：咨询锁（单实例）、常驻轮询、优雅退出（停止领取 → 等待在途 → 归还锁与连接池）。
+ * 全部业务逻辑在 core.ts，便于独立回归测试。
  */
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { PoolClient } from 'pg';
-import { db, pool } from '../server/db/client';
-import { notificationAttempts, notificationJobs, notificationRules } from '../server/db/schema';
-import { getProvider } from './registry';
+import { pool } from '../server/db/client';
+import { hasConfiguredProvider, unconfiguredDetail } from './registry';
+import { MISSED_AFTER_MINUTES, LEASE_MINUTES, tick, type TickContext } from './core';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_MS ?? 20_000);
-const BATCH_SIZE = Number(process.env.WORKER_BATCH ?? 10);
-const LEASE_MINUTES = 5;
-/** 超过该时长仍未发出的提醒视为“错过”，不再补发（PRD FR-07） */
-const MISSED_AFTER_MINUTES = Number(process.env.MISSED_AFTER_MINUTES ?? 120);
-/** 重试退避：第 1/2/3 次失败后分别等待 1/5/15 分钟 */
-const BACKOFF_SECONDS = [60, 300, 900];
-
-type ClaimedJob = {
-  id: string;
-  ruleId: string | null;
-  subjectType: string;
-  subjectId: string;
-  title: string;
-  body: string;
-  attempts: number;
-  maxAttempts: number;
-  idempotencyKey: string;
-};
+/** 退出时等待在途发送的上限；超过则如实标记，而不是静默丢弃 */
+const SHUTDOWN_DRAIN_MS = 15_000;
 
 /** 持有咨询锁的连接：必须在退出时显式归还，否则连接池无法关闭 */
 let lockClient: PoolClient | null = null;
+const ctx: TickContext = { shuttingDown: false };
+let tickInFlight: Promise<unknown> | null = null;
 
-/** 回收租约过期（Worker 崩溃/重启）的“发送中”任务 */
-async function reclaimExpiredLeases(): Promise<number> {
-  const rows = await db.execute(sql`
-    UPDATE notification_jobs
-    SET status = 'pending', leased_until = NULL, updated_at = now()
-    WHERE status = 'sending' AND leased_until IS NOT NULL AND leased_until < now()
-    RETURNING id
-  `);
-  return rows.rowCount ?? 0;
-}
-
-/** 标记错过的提醒：错过就是错过，不补发、不轰炸 */
-async function markMissed(): Promise<number> {
-  const rows = await db.execute(sql`
-    UPDATE notification_jobs
-    SET status = 'missed', updated_at = now(),
-        last_error = COALESCE(last_error, '服务中断期间错过发送时间')
-    WHERE status = 'pending'
-      AND fire_at < now() - ${sql.raw(`interval '${MISSED_AFTER_MINUTES} minutes'`)}
-    RETURNING id
-  `);
-  return rows.rowCount ?? 0;
-}
-
-/** 原子领取到期任务：SKIP LOCKED 保证多实例下也不重复 */
-async function claimDueJobs(): Promise<ClaimedJob[]> {
-  return db.transaction(async (tx) => {
-    const rows = await tx
-      .select({
-        id: notificationJobs.id,
-        ruleId: notificationJobs.ruleId,
-        subjectType: notificationJobs.subjectType,
-        subjectId: notificationJobs.subjectId,
-        title: notificationJobs.title,
-        body: notificationJobs.body,
-        attempts: notificationJobs.attempts,
-        maxAttempts: notificationJobs.maxAttempts,
-        idempotencyKey: notificationJobs.idempotencyKey,
-      })
-      .from(notificationJobs)
-      .where(
-        and(
-          eq(notificationJobs.status, 'pending'),
-          lte(notificationJobs.fireAt, new Date()),
-          or(isNull(notificationJobs.nextAttemptAt), lte(notificationJobs.nextAttemptAt, new Date())),
-        ),
-      )
-      .orderBy(asc(notificationJobs.fireAt))
-      .limit(BATCH_SIZE)
-      .for('update', { skipLocked: true });
-
-    if (rows.length === 0) return [];
-
-    await tx
-      .update(notificationJobs)
-      .set({
-        status: 'sending',
-        leasedUntil: sql`now() + ${sql.raw(`interval '${LEASE_MINUTES} minutes'`)}`,
-        attempts: sql`${notificationJobs.attempts} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        inArray(
-          notificationJobs.id,
-          rows.map((r) => r.id),
-        ),
-      );
-
-    return rows;
-  });
-}
-
-async function resolveChannels(jobs: ClaimedJob[]): Promise<Map<string, string>> {
-  const ruleIds = [...new Set(jobs.map((j) => j.ruleId).filter((id): id is string => Boolean(id)))];
-  const map = new Map<string, string>();
-  if (ruleIds.length === 0) return map;
-
-  const rules = await db
-    .select({ id: notificationRules.id, channel: notificationRules.channel })
-    .from(notificationRules)
-    .where(inArray(notificationRules.id, ruleIds));
-
-  for (const rule of rules) map.set(rule.id, rule.channel);
-  return map;
-}
-
-async function dispatch(job: ClaimedJob, channel: string): Promise<void> {
-  const provider = getProvider(channel);
-
-  if (!provider) {
-    await finishWithFailure(job, `未知通知渠道：${channel}`, true);
-    return;
+async function sleepInterruptible(ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!ctx.shuttingDown && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, Math.min(250, Math.max(1, deadline - Date.now()))));
   }
-
-  const result = await provider.send({
-    jobId: job.id,
-    title: job.title,
-    body: job.body,
-    subjectType: job.subjectType,
-    subjectId: job.subjectId,
-    idempotencyKey: job.idempotencyKey,
-  });
-
-  try {
-    await db.insert(notificationAttempts).values({
-      jobId: job.id,
-      success: result.ok,
-      error: result.ok ? null : result.error,
-    });
-  } catch (err) {
-    console.error('[worker] 记录发送尝试失败:', (err as Error).message);
-  }
-
-  if (result.ok) {
-    await db
-      .update(notificationJobs)
-      .set({ status: 'sent', sentAt: new Date(), lastError: null, leasedUntil: null, updatedAt: new Date() })
-      .where(eq(notificationJobs.id, job.id));
-    console.log(`[worker] 已发送 ${job.id}（${job.subjectType}）`);
-    return;
-  }
-
-  await finishWithFailure(job, result.error, result.permanent === true);
 }
 
-async function finishWithFailure(job: ClaimedJob, error: string, permanent: boolean): Promise<void> {
-  const exhausted = job.attempts >= job.maxAttempts;
+async function runLoop(): Promise<void> {
+  let consecutiveErrors = 0;
 
-  if (permanent || exhausted) {
-    await db
-      .update(notificationJobs)
-      .set({ status: 'failed', lastError: error, leasedUntil: null, updatedAt: new Date() })
-      .where(eq(notificationJobs.id, job.id));
-    console.error(`[worker] 发送失败（已放弃）${job.id}: ${error}`);
-    return;
-  }
-
-  const waitSeconds = BACKOFF_SECONDS[Math.min(job.attempts - 1, BACKOFF_SECONDS.length - 1)]!;
-  await db
-    .update(notificationJobs)
-    .set({
-      status: 'pending',
-      lastError: error,
-      leasedUntil: null,
-      nextAttemptAt: new Date(Date.now() + waitSeconds * 1000),
-      updatedAt: new Date(),
-    })
-    .where(eq(notificationJobs.id, job.id));
-  console.warn(`[worker] 发送失败，${waitSeconds}s 后重试（第 ${job.attempts}/${job.maxAttempts} 次）${job.id}: ${error}`);
-}
-
-let lastUnconfiguredWarnAt = 0;
-function warnUnconfigured(detail: string): void {
-  // 未配置渠道时每 10 分钟提醒一次，避免刷屏日志
-  if (Date.now() - lastUnconfiguredWarnAt < 10 * 60 * 1000) return;
-  lastUnconfiguredWarnAt = Date.now();
-  console.warn(`[worker] 渠道未配置，暂不消费提醒任务（任务保持 pending 不会丢失）：${detail}`);
-}
-
-async function tick(): Promise<void> {
-  const reclaimed = await reclaimExpiredLeases();
-  if (reclaimed > 0) console.warn(`[worker] 回收 ${reclaimed} 条租约过期的任务`);
-
-  const missed = await markMissed();
-  if (missed > 0) console.warn(`[worker] 标记 ${missed} 条错过的提醒（不补发）`);
-
-  const jobs = await claimDueJobs();
-  if (jobs.length === 0) return;
-
-  const channels = await resolveChannels(jobs);
-
-  // 渠道未配置时不消费：任务留在 pending，配置好后自然补齐
-  const firstProvider = getProvider(channels.get(jobs[0]!.ruleId ?? '') ?? 'wechat');
-  if (firstProvider && !firstProvider.isConfigured()) {
-    warnUnconfigured(firstProvider.describe().detail);
-    await db
-      .update(notificationJobs)
-      .set({
-        status: 'pending',
-        leasedUntil: null,
-        attempts: sql`${notificationJobs.attempts} - 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        inArray(
-          notificationJobs.id,
-          jobs.map((j) => j.id),
-        ),
-      );
-    return;
-  }
-
-  for (const job of jobs) {
-    const channel = (job.ruleId && channels.get(job.ruleId)) || 'wechat';
+  while (!ctx.shuttingDown) {
+    tickInFlight = tick(ctx);
     try {
-      await dispatch(job, channel);
+      await tickInFlight;
+      consecutiveErrors = 0;
     } catch (err) {
-      console.error(`[worker] 调度异常 ${job.id}:`, (err as Error).message);
-      await finishWithFailure(job, (err as Error).message.slice(0, 200), false).catch(() => undefined);
+      consecutiveErrors += 1;
+      console.error(`[worker] 轮询异常（连续 ${consecutiveErrors} 次）:`, (err as Error).message);
+      // 数据库短暂不可用时退避，避免打爆日志与连接池
+      if (consecutiveErrors > 3) await sleepInterruptible(30_000);
+    } finally {
+      tickInFlight = null;
     }
+
+    if (ctx.shuttingDown) break;
+    await sleepInterruptible(POLL_INTERVAL_MS);
   }
+
+  console.log('[worker] 轮询已停止');
 }
 
 async function main(): Promise<void> {
@@ -256,40 +64,38 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[worker] 已启动：轮询 ${POLL_INTERVAL_MS}ms，批次 ${BATCH_SIZE}，错过阈值 ${MISSED_AFTER_MINUTES} 分钟`,
+    `[worker] 已启动：轮询 ${POLL_INTERVAL_MS}ms，错过阈值 ${MISSED_AFTER_MINUTES} 分钟，租约 ${LEASE_MINUTES} 分钟`,
   );
-
-  let running = true;
-  let consecutiveErrors = 0;
-
-  while (running) {
-    try {
-      await tick();
-      consecutiveErrors = 0;
-    } catch (err) {
-      consecutiveErrors += 1;
-      console.error(`[worker] 轮询异常（连续 ${consecutiveErrors} 次）:`, (err as Error).message);
-      // 数据库短暂不可用时退避，避免打爆日志与连接池
-      if (consecutiveErrors > 3) await new Promise((r) => setTimeout(r, 30_000));
-    }
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  if (!hasConfiguredProvider()) {
+    console.warn(`[worker] 当前通道未配置，不会领取发送任务：${unconfiguredDetail()}`);
   }
+
+  await runLoop();
 }
 
-let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[worker] 收到 ${signal}，停止轮询…`);
+  if (ctx.shuttingDown) return;
+  ctx.shuttingDown = true;
+  console.log(`[worker] 收到 ${signal}：停止领取新任务，等待在途发送落地…`);
 
-  // 必须留出兜底：任何一步卡住都不能让 systemd 等到超时强杀
+  // 兜底：任何一步卡住都不能让 systemd 等到超时强杀
   const forceExit = setTimeout(() => {
-    console.error('[worker] 退出超时，强制结束');
+    console.error('[worker] 退出超时，强制结束（在途任务将由租约回收机制处理）');
     process.exit(1);
-  }, 8_000);
+  }, SHUTDOWN_DRAIN_MS + 8_000);
   forceExit.unref();
 
-  // 关键：先释放长期占用的咨询锁连接，否则 pool.end() 会一直等待它归还而挂死
+  // 等待在途 tick 完成；tick 内单次发送有超时，因此等待是有界的
+  const deadline = Date.now() + SHUTDOWN_DRAIN_MS;
+  while (tickInFlight && Date.now() < deadline) {
+    await Promise.race([tickInFlight.catch(() => undefined), new Promise((r) => setTimeout(r, 250))]);
+  }
+  if (tickInFlight) {
+    console.warn(
+      '[worker] 在途发送未在上限内完成；该任务保持 sending，租约到期后将被标记为结果未知（不自动重发）',
+    );
+  }
+
   if (lockClient) {
     try {
       await lockClient.query(`select pg_advisory_unlock(hashtext('lifeos_worker'))`);
@@ -300,9 +106,9 @@ async function shutdown(signal: string): Promise<void> {
     lockClient = null;
   }
 
-  // 未发完的任务保持 pending，下次启动继续；租约到期后也会被回收
   await pool.end().catch(() => undefined);
   clearTimeout(forceExit);
+  console.log('[worker] 已退出');
   process.exit(0);
 }
 

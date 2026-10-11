@@ -2,15 +2,15 @@ import { Hono } from 'hono';
 import { sql } from 'drizzle-orm';
 import { config } from '../config';
 import { db } from '../db/client';
+import { getProviderStatuses } from '../lib/provider-status';
 import { requireAuth, type AppEnv } from '../middleware/auth';
-import { listProviderStatuses } from '../../worker/registry';
 
 export const statusRoutes = new Hono<AppEnv>();
 
 const VERSION = '0.1.0';
 
 /**
- * 系统状态：只报告“配置与否”，**绝不返回密钥内容**（PRD FR-01）。
+ * 系统状态：只报告"配置与否 / 是否可达"，**绝不返回密钥内容**（PRD FR-01）。
  */
 statusRoutes.get('/', requireAuth, async (c) => {
   let dbStatus: 'up' | 'down' = 'down';
@@ -23,6 +23,7 @@ statusRoutes.get('/', requireAuth, async (c) => {
 
   const asrKey = Boolean(process.env.MIMO_API_KEY);
   const llmKey = Boolean(process.env.DEEPSEEK_API_KEY);
+  const { statuses, probedAt } = await getProviderStatuses();
 
   return c.json({
     version: VERSION,
@@ -41,7 +42,8 @@ statusRoutes.get('/', requireAuth, async (c) => {
         baseUrl: hostOf(process.env.DEEPSEEK_BASE_URL),
       },
     },
-    notifications: listProviderStatuses(),
+    notifications: statuses,
+    providersProbedAt: probedAt,
   });
 });
 

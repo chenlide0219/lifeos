@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError, api, type SystemStatusResponse } from '../api';
 import { IconLogout } from '../components/Icons';
+import { NotificationLog } from '../components/NotificationLog';
 import { Alert, Card, PageHeader, Spinner, StatusDot } from '../components/ui';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme, type ThemeMode } from '../hooks/useTheme';
@@ -168,13 +169,20 @@ export function SettingsPage() {
                   tone={status.ai.llm.configured ? 'ok' : 'warn'}
                 />
                 {status.notifications.map((provider) => (
-                  <div key={provider.channel}>
+                  <div key={provider.channel} className="space-y-1.5">
                     <Row
-                      label={provider.name}
+                      label={`${provider.name} · 凭据`}
                       value={provider.configured ? '已配置' : '未配置'}
                       tone={provider.configured ? 'ok' : 'warn'}
                     />
-                    <p className="mt-1 text-xs text-muted">{provider.detail}</p>
+                    <Row
+                      label={`${provider.name} · 链路`}
+                      value={
+                        provider.reachable === null ? '未探测' : provider.reachable ? '可达' : '不可达'
+                      }
+                      tone={provider.reachable === null ? 'idle' : provider.reachable ? 'ok' : 'error'}
+                    />
+                    <p className="text-xs leading-relaxed text-muted">{provider.detail}</p>
                   </div>
                 ))}
                 <Row label="服务版本" value={status.version} />
@@ -183,6 +191,14 @@ export function SettingsPage() {
           </Card>
         </div>
       </div>
+
+      <Card
+        title="通知记录"
+        subtitle="提醒任务的状态、错过原因与失败明细（结果未知的任务需人工核实手机是否已收到）"
+        className="mt-4"
+      >
+        <NotificationLog />
+      </Card>
 
       <Card title="数据管理" subtitle="备份与导出" className="mt-4">
         <ul className="space-y-2 text-sm text-muted">
