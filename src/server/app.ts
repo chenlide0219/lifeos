@@ -11,6 +11,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { config } from './config';
 import { authRoutes } from './routes/auth';
 import { calendarRoutes } from './routes/calendar';
+import { csvRoutes } from './routes/csv-import';
 import { eventRoutes } from './routes/events';
 import { healthRoutes } from './routes/health';
 import { notificationRoutes } from './routes/notifications';
@@ -59,6 +60,7 @@ export function createApp(): Hono {
   api.route('/calendar', calendarRoutes);
   api.route('/voice', voiceRoutes);
   api.route('/subscriptions', subscriptionRoutes);
+  api.route('/imports', csvRoutes);
 
   app.route('/api', api);
 
