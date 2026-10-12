@@ -189,7 +189,15 @@ subscriptionRoutes.get('/summary', requireAuth, async (c) =>
 
     let expectedMonthly = 0;
     const byCurrency: Record<string, number> = {};
-    const upcoming: { id: string; name: string; date: string; amount: string; currency: string }[] = [];
+    const upcoming: {
+      id: string;
+      name: string;
+      date: string;
+      amount: string;
+      currency: string;
+      /** 关闭自动续费的订阅其实不会真的续费，界面必须能区分 */
+      autoRenew: boolean;
+    }[] = [];
 
     for (const row of rows) {
       const config = toConfig(row as unknown as Record<string, unknown>);
@@ -200,13 +208,14 @@ subscriptionRoutes.get('/summary', requireAuth, async (c) =>
       }
 
       const next = row.nextBillingDate;
-      if (next && next >= today) {
+      if (next && next >= today && config.status !== 'ended' && config.status !== 'paused') {
         upcoming.push({
           id: row.id,
           name: row.name,
           date: next,
           amount: row.price ?? '0.00',
           currency: row.currency,
+          autoRenew: config.autoRenew,
         });
       }
     }

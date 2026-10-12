@@ -305,7 +305,7 @@ export type SubscriptionDetail = {
 export type SubscriptionsSummary = {
   expected: { monthlyByCurrency: Record<string, number>; monthlyTotalNote: string };
   actual: { currency: string; gross: string; refunds: string; net: string; count: number }[];
-  upcoming: { id: string; name: string; date: string; amount: string; currency: string }[];
+  upcoming: { id: string; name: string; date: string; amount: string; currency: string; autoRenew: boolean }[];
   subscriptions: number;
   expectedMonthly: string;
   today: string;

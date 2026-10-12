@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, api, type OverviewResponse, type SystemStatusResponse } from '../api';
+import { ApiError, api, type OverviewResponse, type SubscriptionsSummary, type SystemStatusResponse } from '../api';
 import { IconBell, IconCalendar, IconPlus, IconTodo } from '../components/Icons';
 import { QuickAddDialog, type QuickAddMode } from '../components/QuickAdd';
 import { Alert, Card, EmptyState, PageHeader, Spinner, StatusDot } from '../components/ui';
@@ -20,6 +20,7 @@ export function DashboardPage() {
   const { user } = useAuth();
   const [status, setStatus] = useState<SystemStatusResponse | null>(null);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [summary, setSummary] = useState<SubscriptionsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<QuickAddMode>('event');
@@ -27,9 +28,14 @@ export function DashboardPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [statusRes, overviewRes] = await Promise.all([api.status(), api.calendar.overview()]);
+      const [statusRes, overviewRes, summaryRes] = await Promise.all([
+        api.status(),
+        api.calendar.overview(),
+        api.subscriptions.summary(),
+      ]);
       setStatus(statusRes);
       setOverview(overviewRes);
+      setSummary(summaryRes);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '读取数据失败');
     }
@@ -134,12 +140,87 @@ export function DashboardPage() {
           )}
         </Card>
 
-        <Card title="即将到期订阅" subtitle="阶段 4 接入">
-          <EmptyState
-            icon={<IconBell width={28} height={28} />}
-            title="订阅模块尚未实现"
-            description="订阅档案、预计账单与续费提醒将在阶段 4 完成后出现在这里。"
-          />
+        <Card
+          title="即将到期订阅"
+          subtitle={summary ? `${summary.upcoming.length} 项待扣费` : '按当前计费周期推算'}
+        >
+          {!summary ? (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted">
+              <Spinner /> 读取中…
+            </div>
+          ) : summary.upcoming.length === 0 ? (
+            <EmptyState
+              icon={<IconBell width={28} height={28} />}
+              title="近期没有待扣费的订阅"
+              description="新增订阅后，系统会按计费规则生成未来 12 个月的预计账单。"
+            />
+          ) : (
+            <ul className="divide-y divide-line">
+              {summary.upcoming.map((s) => (
+                <li key={`${s.id}-${s.date}`} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm">{s.name}</p>
+                    <p className="text-xs text-muted">
+                      预计扣费 {s.date}
+                      {s.autoRenew ? '' : ' · 已关闭自动续费'}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-sm">
+                    {s.amount} <span className="text-xs text-muted">{s.currency}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        <Card title="费用概览" subtitle="两套口径分开统计，不可相加">
+          {!summary ? (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted">
+              <Spinner /> 读取中…
+            </div>
+          ) : (
+            <dl className="space-y-3 text-sm">
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-muted">
+                  预计月均支出
+                  <span className="ml-1 text-xs">（按当前周期折算）</span>
+                </dt>
+                <dd className="text-lg font-semibold">
+                  {summary.expectedMonthly}
+                  <span className="ml-1 text-xs font-normal text-muted">人民币口径见统计页</span>
+                </dd>
+              </div>
+
+              <div className="border-t border-line pt-3">
+                <dt className="mb-1 text-muted">
+                  实际净支出
+                  <span className="ml-1 text-xs">（已确认付款扣除退款）</span>
+                </dt>
+                {summary.actual.length === 0 ? (
+                  <dd className="text-sm text-muted">尚无实际付款记录</dd>
+                ) : (
+                  <dd className="space-y-1">
+                    {summary.actual.map((a) => (
+                      <div key={a.currency} className="flex items-baseline justify-between gap-3">
+                        <span className="text-xs text-muted">
+                          付款 {a.gross} · 退款 {a.refunds}
+                        </span>
+                        <span className="text-lg font-semibold">
+                          {a.net} <span className="text-xs font-normal text-muted">{a.currency}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </dd>
+                )}
+              </div>
+
+              <p className="border-t border-line pt-3 text-xs text-muted">
+                预计与实付是两套口径，页面不提供相加；跨币种汇总需带日期的汇率快照，
+                详见「统计」页。
+              </p>
+            </dl>
+          )}
         </Card>
 
         <Card title="系统状态" subtitle="服务端实时数据">
