@@ -1,17 +1,22 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 import { requireTestDatabase } from '../helpers/guard';
 
-requireTestDatabase();
+// Guard the target and force every imported DB client onto it, even when this file runs alone.
+process.env.DATABASE_URL = requireTestDatabase();
 process.env.SESSION_SECRET = 'test-secret-at-least-thirty-two-characters-long';
 delete process.env.ILINK_TOKEN;
 delete process.env.ILINK_TO_USER_ID;
 const { pool } = await import('../../src/server/db/client');
+const { db } = await import('../../src/server/db/client');
+const { notificationJobs } = await import('../../src/server/db/schema');
+const { tick } = await import('../../src/worker/core');
 const { createApp } = await import('../../src/server/app');
 const { hashPassword } = await import('../../src/server/lib/password');
 const { ManagedWechatProvider } = await import('../../src/worker/providers/managed-wechat');
 const { pollWechatUpdates } = await import('../../src/worker/wechat-listener');
-const { readWechatState, WECHAT_STATE_KEY } = await import('../../src/server/lib/wechat-state');
+const { readWechatState, updateWechatState, WECHAT_STATE_KEY } = await import('../../src/server/lib/wechat-state');
 const app = createApp();
 const originalFetch = globalThis.fetch;
 let cookie = '';
@@ -48,6 +53,7 @@ before(async () => {
 });
 after(async () => {
   globalThis.fetch = originalFetch;
+  await pool.query('DELETE FROM notification_jobs WHERE idempotency_key=$1', ['wechat-window-test-job']);
   await pool.query('DELETE FROM settings WHERE key=$1', [WECHAT_STATE_KEY]);
   await pool.query('TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE');
   await pool.end();
@@ -94,5 +100,21 @@ describe('LifeOS 独立扫码和发送窗口', () => {
     await provider.refresh();
     assert.equal(provider.canSend(), true);
     assert.equal((await readWechatState()).used, 0);
+  });
+  it('Worker 暂停时不领取任务，收到新消息后才恢复派发', async () => {
+    await updateWechatState(s => { s.used = 10; s.pausedReason = 'threshold'; });
+    const [job] = await db.insert(notificationJobs).values({ subjectType: 'system', subjectId: crypto.randomUUID(),
+      title: '暂停演练', body: '测试', fireAt: new Date(), idempotencyKey: 'wechat-window-test-job' }).returning({ id: notificationJobs.id });
+    assert.ok(job);
+    const paused = await tick();
+    assert.equal(paused.claimed, 0);
+    const pending = await pool.query<{ status: string }>('SELECT status FROM notification_jobs WHERE id=$1', [job.id]);
+    assert.equal(pending.rows[0]?.status, 'pending');
+    inboundId++;
+    await pollWechatUpdates();
+    const resumed = await tick();
+    assert.equal(resumed.sent, 1);
+    const sent = await pool.query<{ status: string }>('SELECT status FROM notification_jobs WHERE id=$1', [job.id]);
+    assert.equal(sent.rows[0]?.status, 'sent');
   });
 });
