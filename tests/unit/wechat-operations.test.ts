@@ -253,6 +253,63 @@ describe('原子提交', () => {
     );
     assert.equal(rule.rows![0]!.enabled, false, '规则必须保持关闭，不能被默认值打开');
   });
+
+  it('补全字段后状态自动升级为 pending_confirm，否则草稿会永久无法确认（真实缺陷回归）', async () => {
+    // 缺开始时间的草稿
+    const incomplete: Draft = { ...emptyDraft('event'), title: '开会' };
+    const op = await createOperation({
+      bindingGeneration: GEN,
+      draftKind: 'event',
+      draft: incomplete,
+      missingFields: missingFields(incomplete),
+      shortCode: 'H4J5',
+      sourceInboxId: INBOX,
+      now: NOW,
+    });
+    assert.equal(op!.status, 'awaiting_fields');
+
+    // 补齐开始时间
+    const complete: Draft = { ...incomplete, startAt: zonedToInstant(2026, 10, 14, 15, 0).toISOString() };
+    const updated = await updateOperation({
+      operationId: op!.id,
+      draft: complete,
+      missingFields: missingFields(complete),
+      shortCode: 'K6L7',
+      bumpVersion: true,
+      now: NOW,
+    });
+
+    assert.equal(updated!.status, 'pending_confirm', '补全字段后必须升级为待确认');
+    assert.deepEqual(updated!.missingFields, []);
+
+    // 关键后果验证：升级后才可能提交（commitOperation 只接受 pending_confirm）
+    const result = await commitOperation(op!.id, updated!.version, NOW);
+    assert.equal(result.ok, true, '补全字段的草稿必须能够提交');
+  });
+
+  it('补丁仍缺字段时保持 awaiting_fields', async () => {
+    const incomplete: Draft = { ...emptyDraft('event'), title: '开会' };
+    const op = await createOperation({
+      bindingGeneration: GEN,
+      draftKind: 'event',
+      draft: incomplete,
+      missingFields: missingFields(incomplete),
+      shortCode: 'M8N9',
+      sourceInboxId: INBOX,
+      now: NOW,
+    });
+
+    // 只补了备注，仍然缺开始时间
+    const stillMissing: Draft = { ...incomplete, note: '记得带材料' };
+    const updated = await updateOperation({
+      operationId: op!.id,
+      draft: stillMissing,
+      missingFields: missingFields(stillMissing),
+      bumpVersion: true,
+      now: NOW,
+    });
+    assert.equal(updated!.status, 'awaiting_fields');
+  });
 });
 
 describe('短码、版本与到期', () => {

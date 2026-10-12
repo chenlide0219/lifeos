@@ -191,9 +191,25 @@ export type UpdateOperationInput = {
   now?: Date;
 };
 
-/** 更新草稿：每次有效修改递增版本并续期（PRD 3.3、16.1-4） */
+/**
+ * 更新草稿：每次有效修改递增版本并续期（PRD 3.3、16.1-4）。
+ *
+ * **状态必须由"是否还缺字段"推导**，不能让调用方忘记设置：
+ * `commitOperation` 只接受 `pending_confirm`，如果补全字段后状态仍停在
+ * `awaiting_fields`，草稿会永久卡死、无法确认（这是实际发生过的缺陷）。
+ * 因此当本次更新提供了 `missingFields` 时，状态一并推导；
+ * 调用方显式传入 `status` 时以调用方为准。
+ */
 export async function updateOperation(input: UpdateOperationInput): Promise<OperationRow | null> {
   const now = input.now ?? new Date();
+  const derivedStatus =
+    input.status ??
+    (input.missingFields !== undefined
+      ? input.missingFields.length > 0
+        ? 'awaiting_fields'
+        : 'pending_confirm'
+      : undefined);
+
   const rows = await db
     .update(wechatOperations)
     .set({
@@ -202,7 +218,7 @@ export async function updateOperation(input: UpdateOperationInput): Promise<Oper
         ? { missingFields: input.missingFields }
         : {}),
       ...(input.shortCode !== undefined ? { shortCode: input.shortCode } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(derivedStatus !== undefined ? { status: derivedStatus } : {}),
       ...(input.previewRevision !== undefined ? { previewRevision: input.previewRevision } : {}),
       ...(input.bumpVersion ? { version: sql`${wechatOperations.version} + 1` } : {}),
       // 每次有效修改都续期
