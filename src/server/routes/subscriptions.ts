@@ -20,12 +20,14 @@ import {
   type BillingPeriod,
 } from '../lib/billing';
 import { resolveCnyAmount } from '../lib/fx';
+import { purgeSubjectNotifications, rebuildSubscriptionNotifications } from '../lib/scheduling';
 import { todayInTz } from '../lib/time';
 import {
   assertCurrency,
   optBoolean,
   optDateString,
   optString,
+  optTimeString,
   parseUuid,
   reqString,
   ValidationError,
@@ -90,6 +92,11 @@ function readSubscriptionBody(body: Record<string, unknown>, { partial }: { part
     patch.billingPeriod = period;
   }
   if (!partial || body.anchorDate !== undefined) patch.anchorDate = optDateString(body.anchorDate, '计费锚点');
+  // 下次预计扣费日：PRD FR-05 列为必要字段，用户需要能手工校正
+  // （此前该字段未在此处理，传入会被静默丢弃——请求看着成功，值却没了）
+  if (!partial || body.nextBillingDate !== undefined) {
+    patch.nextBillingDate = optDateString(body.nextBillingDate, '下次扣费日');
+  }
   if (!partial || body.serviceEndDate !== undefined) {
     patch.serviceEndDate = optDateString(body.serviceEndDate, '服务到期日');
   }
@@ -111,6 +118,18 @@ function readSubscriptionBody(body: Record<string, unknown>, { partial }: { part
   if (body.category !== undefined) patch.category = optString(body.category, '分类', 64);
   if (body.note !== undefined) patch.note = optString(body.note, '备注', 2000);
   if (body.reminderEnabled !== undefined) patch.reminderEnabled = optBoolean(body.reminderEnabled, '提醒开关', false);
+  if (body.reminderDaysBefore !== undefined) {
+    const raw = body.reminderDaysBefore;
+    if (raw === null || raw === '') patch.reminderDaysBefore = 3;
+    else if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 365) {
+      patch.reminderDaysBefore = raw;
+    } else {
+      throw new ValidationError('提前天数必须是 0 到 365 之间的整数');
+    }
+  }
+  if (body.reminderTime !== undefined) {
+    patch.reminderTime = optTimeString(body.reminderTime, '提醒时刻') ?? '09:00';
+  }
 
   return patch;
 }
@@ -290,7 +309,9 @@ subscriptionRoutes.post('/', requireAuth, async (c) =>
     }
 
     const bills = await regenerateBills(created!.id);
-    return c.json({ subscription: created, expectedBills: bills }, 201);
+    // 订阅提醒：每项独立配置通知开关、提前天数与发送时刻（PRD FR-05）
+    const reminder = await rebuildSubscriptionNotifications(created!.id);
+    return c.json({ subscription: created, expectedBills: bills, reminder }, 201);
   }),
 );
 
@@ -343,8 +364,10 @@ subscriptionRoutes.patch('/:id', requireAuth, async (c) =>
       .delete(expectedBills)
       .where(and(eq(expectedBills.subscriptionId, id), eq(expectedBills.status, 'expected')));
     const bills = await regenerateBills(id);
+    // 扣费日或提醒设置变化后重建：旧提醒先失效，避免按旧日期发出
+    const reminder = await rebuildSubscriptionNotifications(id);
 
-    return c.json({ subscription: updated, expectedBills: bills });
+    return c.json({ subscription: updated, expectedBills: bills, reminder });
   }),
 );
 
@@ -354,7 +377,9 @@ subscriptionRoutes.delete('/:id', requireAuth, async (c) =>
     const [existing] = await db.select({ id: subscriptions.id }).from(subscriptions).where(eq(subscriptions.id, id)).limit(1);
     if (!existing) return c.json({ error: 'not_found', message: '订阅不存在' }, 404);
 
-    // 付款记录保留（外键为 SET NULL），历史支出不得因删除订阅而消失
+    // 先清理提醒（含未发送任务与规则），再删除订阅；付款记录保留（外键为 SET NULL），
+    // 历史支出不得因删除订阅而消失
+    await purgeSubjectNotifications('subscription', id);
     await db.delete(subscriptions).where(eq(subscriptions.id, id));
     return c.json({ ok: true });
   }),

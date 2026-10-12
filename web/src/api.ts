@@ -224,6 +224,9 @@ export type SubscriptionDto = {
   paymentChannel: string | null;
   category: string | null;
   note: string | null;
+  reminderEnabled: boolean;
+  reminderDaysBefore: number;
+  reminderTime: string | null;
   /** 按当前周期折算的月均；终身订阅为 null */
   monthlyEquivalent?: string | null;
 };
@@ -264,6 +267,7 @@ export type SubscriptionInput = {
   billingPeriod?: string;
   billingIntervalDays?: number | null;
   anchorDate?: string | null;
+  nextBillingDate?: string | null;
   serviceEndDate?: string | null;
   autoRenew?: boolean;
   status?: string;
@@ -271,6 +275,11 @@ export type SubscriptionInput = {
   paymentChannel?: string | null;
   category?: string | null;
   note?: string | null;
+  reminderEnabled?: boolean;
+  /** 提前天数，0 表示当天提醒 */
+  reminderDaysBefore?: number;
+  /** 发送时刻 HH:mm */
+  reminderTime?: string;
 };
 
 export type PaymentInput = {

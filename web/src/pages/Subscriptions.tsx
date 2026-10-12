@@ -98,12 +98,16 @@ export function SubscriptionsPage() {
         billingPeriod: editing.billingPeriod ?? 'monthly',
         billingIntervalDays: editing.billingIntervalDays ?? null,
         anchorDate: editing.anchorDate ?? null,
+        nextBillingDate: editing.nextBillingDate ?? null,
         serviceEndDate: editing.serviceEndDate ?? null,
         autoRenew: editing.autoRenew ?? true,
         status: editing.status ?? 'active',
         paymentChannel: editing.paymentChannel ?? null,
         category: editing.category ?? null,
         note: editing.note ?? null,
+        reminderEnabled: editing.reminderEnabled ?? false,
+        reminderDaysBefore: editing.reminderDaysBefore ?? 3,
+        reminderTime: (editing.reminderTime ?? '09:00').slice(0, 5),
       };
       if (editing.id) await api.subscriptions.update(editing.id, payload);
       else await api.subscriptions.create(payload);
@@ -460,16 +464,61 @@ function SubscriptionDialog({
               <p className="mt-1 text-xs text-muted">遇到 29/30/31 日时自动落到当月最后一天</p>
             </div>
             <div>
-              <label className="label" htmlFor="sub-end">服务到期日</label>
-              <input id="sub-end" type="date" className="input" value={value.serviceEndDate ?? ''} onChange={(e) => onChange({ ...value, serviceEndDate: e.target.value })} />
+              <label className="label" htmlFor="sub-next">下次预计扣费日</label>
+              <input id="sub-next" type="date" className="input" value={value.nextBillingDate ?? ''} onChange={(e) => onChange({ ...value, nextBillingDate: e.target.value })} />
+              <p className="mt-1 text-xs text-muted">留空则按锚点推算；可手工校正</p>
             </div>
+          </div>
+
+          <div>
+            <label className="label" htmlFor="sub-end">服务到期日</label>
+            <input id="sub-end" type="date" className="input" value={value.serviceEndDate ?? ''} onChange={(e) => onChange({ ...value, serviceEndDate: e.target.value })} />
           </div>
 
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-line p-3.5">
             <span className="text-sm font-medium">自动续费</span>
             <input type="checkbox" className="h-4 w-4 accent-[#6366f1]" checked={value.autoRenew ?? true} onChange={(e) => onChange({ ...value, autoRenew: e.target.checked, status: e.target.checked ? 'active' : 'auto_renew_off' })} />
           </label>
-          <p className="-mt-2 text-xs text-muted">关闭后系统不会再生成未来扣费，只显示已知的服务到期日</p>
+          <p className="-mt-2 text-xs text-muted">关闭后系统不会再生成未来扣费，提醒也会改为「服务到期」</p>
+
+          <div className="rounded-xl border border-line p-3.5">
+            <label className="flex cursor-pointer items-center justify-between gap-3">
+              <span className="text-sm font-medium">微信提醒</span>
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-[#6366f1]"
+                checked={value.reminderEnabled ?? false}
+                onChange={(e) => onChange({ ...value, reminderEnabled: e.target.checked })}
+              />
+            </label>
+            {value.reminderEnabled ? (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="label" htmlFor="sub-remind-days">提前天数</label>
+                  <input
+                    id="sub-remind-days"
+                    className="input"
+                    inputMode="numeric"
+                    value={value.reminderDaysBefore ?? 3}
+                    onChange={(e) => onChange({ ...value, reminderDaysBefore: Number(e.target.value || 0) })}
+                  />
+                  <p className="mt-1 text-xs text-muted">0 表示当天提醒</p>
+                </div>
+                <div>
+                  <label className="label" htmlFor="sub-remind-time">发送时刻</label>
+                  <input
+                    id="sub-remind-time"
+                    type="time"
+                    className="input"
+                    value={(value.reminderTime ?? '09:00').slice(0, 5)}
+                    onChange={(e) => onChange({ ...value, reminderTime: e.target.value })}
+                  />
+                </div>
+              </div>
+            ) : (
+              <p className="mt-2 text-xs text-muted">默认不提醒；开启后可分别设置提前天数与发送时刻</p>
+            )}
+          </div>
 
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" className="btn-ghost" onClick={onCancel}>取消</button>

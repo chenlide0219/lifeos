@@ -16,8 +16,8 @@
  */
 import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { db } from '../db/client';
-import { events, notificationJobs, notificationRules, tasks } from '../db/schema';
-import { zonedToInstant } from './time';
+import { events, notificationJobs, notificationRules, subscriptions, tasks } from '../db/schema';
+import { addDays, zonedToInstant } from './time';
 
 export type SubjectType = 'event' | 'task' | 'subscription';
 
@@ -66,13 +66,13 @@ export type ReminderRuleInput = { enabled: boolean; offsetsMinutes: number[] };
 
 /** 事件与待办共用同一套规则表，只是主体类型不同 */
 export async function upsertRule(
-  subjectType: 'event' | 'task',
+  subjectType: SubjectType,
   subjectId: string,
   input: ReminderRuleInput,
-): Promise<void> {
+): Promise<string> {
   const offsets = normalizeOffsets(input.offsetsMinutes);
 
-  await db
+  const [row] = await db
     .insert(notificationRules)
     .values({
       subjectType,
@@ -85,7 +85,10 @@ export async function upsertRule(
     .onConflictDoUpdate({
       target: [notificationRules.subjectType, notificationRules.subjectId, notificationRules.channel],
       set: { enabled: input.enabled, offsetsMinutes: offsets, updatedAt: new Date() },
-    });
+    })
+    .returning({ id: notificationRules.id });
+
+  return row!.id;
 }
 
 export const upsertEventRule = (eventId: string, input: ReminderRuleInput) =>
@@ -104,7 +107,7 @@ export function offsetLabel(minutes: number): string {
 }
 
 export function buildIdempotencyKey(
-  subjectType: 'event' | 'task',
+  subjectType: SubjectType,
   subjectId: string,
   offsetMinutes: number,
   fireAt: Date,
@@ -138,7 +141,7 @@ async function loadRule(subjectType: 'event' | 'task', subjectId: string) {
  *   - 已发送的记录保持不动（避免重复送达）。
  */
 async function applyPlan(
-  subjectType: 'event' | 'task',
+  subjectType: SubjectType,
   subjectId: string,
   ruleId: string,
   plan: ReminderPlan[],
@@ -351,6 +354,104 @@ export async function rebuildTaskNotifications(taskId: string): Promise<RebuildR
 
   const applied = await applyPlan('task', taskId, rule.id, plan);
   return { ...applied, skippedPast, ruleEnabled: true };
+}
+
+export type SubscriptionRebuildResult = RebuildResult & {
+  /** 本次提醒针对的日期（下次扣费日或服务到期日） */
+  targetDate: string | null;
+  /** billing=扣费提醒，service_end=到期提醒 */
+  kind: 'billing' | 'service_end' | null;
+};
+
+/**
+ * 订阅提醒重建（PRD FR-05 / FR-07：每项订阅独立配置通知开关、提前天数/时刻）。
+ *
+ * 语义：
+ *   - 自动续费**开启** → 提醒"下次扣费"（提前 N 天，在指定时刻发送）；
+ *   - 自动续费**关闭** → 提醒"服务到期"，因为此时不会有下一次扣费；
+ *   - 已结束 / 已暂停 / 未开启提醒 → 不排提醒，并取消未发送的旧提醒；
+ *   - 已经过去的提醒时刻不补发。
+ */
+export async function rebuildSubscriptionNotifications(
+  subscriptionId: string,
+): Promise<SubscriptionRebuildResult> {
+  const [row] = await db
+    .select({
+      id: subscriptions.id,
+      name: subscriptions.name,
+      status: subscriptions.status,
+      autoRenew: subscriptions.autoRenew,
+      nextBillingDate: subscriptions.nextBillingDate,
+      serviceEndDate: subscriptions.serviceEndDate,
+      reminderEnabled: subscriptions.reminderEnabled,
+      reminderDaysBefore: subscriptions.reminderDaysBefore,
+      reminderTime: subscriptions.reminderTime,
+      price: subscriptions.price,
+      currency: subscriptions.currency,
+    })
+    .from(subscriptions)
+    .where(eq(subscriptions.id, subscriptionId))
+    .limit(1);
+
+  if (!row) throw new Error(`订阅不存在：${subscriptionId}`);
+
+  const empty: RebuildResult = {
+    created: 0,
+    resurrected: 0,
+    cancelled: 0,
+    skippedPast: 0,
+    skippedSent: 0,
+    ruleEnabled: false,
+  };
+
+  const stop = async (): Promise<SubscriptionRebuildResult> => {
+    const cancelled = await cancelActiveNotifications('subscription', subscriptionId);
+    return { ...empty, cancelled, targetDate: null, kind: null };
+  };
+
+  if (row.status === 'ended' || row.status === 'paused' || !row.reminderEnabled) return stop();
+
+  // 自动续费关闭时不会有下一次扣费，提醒服务到期才有意义
+  const kind: 'billing' | 'service_end' = row.autoRenew ? 'billing' : 'service_end';
+  const targetDate =
+    (row.autoRenew ? row.nextBillingDate : row.serviceEndDate) ?? row.nextBillingDate ?? row.serviceEndDate;
+  if (!targetDate) return stop();
+
+  const daysBefore = row.reminderDaysBefore ?? 3;
+  const [hh, mm] = (row.reminderTime ?? '09:00').split(':').map(Number);
+  const remindDate = addDays(targetDate, -daysBefore);
+  const [y, mo, d] = remindDate.split('-').map(Number);
+  const fireAt = zonedToInstant(y!, mo!, d!, hh ?? 9, mm ?? 0);
+
+  const ruleId = await upsertRule('subscription', subscriptionId, {
+    enabled: true,
+    offsetsMinutes: [daysBefore * 1440],
+  });
+
+  const title = kind === 'billing' ? `${row.name} 即将扣费` : `${row.name} 即将到期`;
+  const detail =
+    kind === 'billing'
+      ? `将于 ${targetDate} 扣费${row.price ? ` ${row.price} ${row.currency}` : ''}`
+      : `服务将于 ${targetDate} 到期`;
+
+  const now = Date.now();
+  const plan: ReminderPlan[] = [];
+  let skippedPast = 0;
+
+  // 已经过去的提醒时刻不补发
+  if (fireAt.getTime() <= now) {
+    skippedPast = 1;
+  } else {
+    plan.push({
+      offsetMinutes: daysBefore * 1440,
+      fireAt,
+      title,
+      body: `${detail}（提前 ${daysBefore} 天提醒）`,
+    });
+  }
+
+  const applied = await applyPlan('subscription', subscriptionId, ruleId, plan);
+  return { ...applied, skippedPast, ruleEnabled: true, targetDate, kind };
 }
 
 /** 事项被物理删除：清掉未发送任务、规则与任务记录，避免悬挂引用 */
