@@ -14,7 +14,10 @@ export class ManagedWechatProvider implements NotificationProvider {
   isConfigured(): boolean { return this.state.account ? true : this.legacy.isConfigured(); }
   canSend(): boolean { return this.state.account ? canSendWechat(this.state) : this.legacy.isConfigured(); }
   describe(): ProviderStatus {
-    if (!this.state.account) return this.legacy.describe();
+    if (!this.state.account) {
+      const legacy = this.legacy.describe();
+      return legacy.configured ? legacy : { ...legacy, detail: '未扫码绑定；请在「设置 → 微信提醒」获取二维码，扫码后向机器人发送一句话' };
+    }
     let detail = !this.state.context ? '已扫码绑定；请在微信向机器人发送一句话以启用提醒' :
       !this.canSend() ? '微信发送已暂停，请回复消息或发送 /refresh-context 刷新上下文' :
       `已绑定；本轮占用 ${this.state.used}/${PAUSE_AT} 次（经验估计）`;
