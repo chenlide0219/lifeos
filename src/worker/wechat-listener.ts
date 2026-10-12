@@ -17,6 +17,11 @@
 import { ilinkRequest } from '../server/lib/wechat-api';
 import { unseal, updateWechatState, readWechatState, type WechatCredentials } from '../server/lib/wechat-state';
 import { fingerprintOf, persistInbound, type InboundMessage } from '../server/lib/wechat-inbox';
+import { processInboxBatch } from '../server/lib/wechat-processor';
+import { sendPendingReplies } from './outbox-sender';
+
+/** 每轮处理多少条入站消息 */
+const INBOX_BATCH_SIZE = Number(process.env.WECHAT_INBOX_BATCH ?? 5);
 
 export type PollOutcome = {
   /** 是否处于已绑定状态（未绑定时不轮询，也不算错误） */
@@ -202,7 +207,13 @@ export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutco
   };
 }
 
-/** 监听循环：轮询 → 短暂停顿 → 再轮询。异常不终止循环，只记录状态。 */
+/**
+ * 监听循环：轮询 → 处理入站 → 发送回复 → 短暂停顿 → 再轮询。
+ *
+ * 顺序很重要：**先持久化再处理**。因此即使进程在处理中途被杀，
+ * 消息仍留在 inbox 里可由租约回收重放，不会丢。
+ * 异常不终止循环，只记录状态——单条坏消息不能停掉整个接收。
+ */
 export function startWechatListener(): () => Promise<void> {
   const controller = new AbortController();
   const pause = () =>
@@ -228,6 +239,20 @@ export function startWechatListener(): () => Promise<void> {
           }).catch(() => undefined);
         }
       }
+
+      // 处理与发送都在轮询之外：模型调用与网络发送不得持有数据库事务
+      try {
+        await processInboxBatch(INBOX_BATCH_SIZE);
+      } catch (err) {
+        console.error('[worker] 入站处理异常:', (err as Error).message);
+      }
+
+      try {
+        await sendPendingReplies();
+      } catch (err) {
+        console.error('[worker] 回复发送异常:', (err as Error).message);
+      }
+
       await pause();
     }
   })();
