@@ -19,7 +19,7 @@
  * - 绑定代际变化后，旧代际的消息不再被领取（换绑即作废）。
  */
 import crypto from 'node:crypto';
-import { and, asc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { wechatInbox } from '../db/schema';
 import { seal, type WechatState } from './wechat-state';
@@ -291,13 +291,34 @@ export async function markInboxFailed(id: string, error: string, now = new Date(
 
 /**
  * 回收超租约的 processing 记录。
- * 进程被 kill -9 后不会有任何清理代码运行，只能靠租约超时兜底。
+ *
+ * 必须覆盖两种情形，缺一不可：
+ *   1. `leased_until` 已过期 → 正常超时；
+ *   2. `leased_until IS NULL` 且已超过一个租约时长 → **进程在"置 processing"
+ *      与"写租约"之间被杀**留下的行。
+ *      注意 `lt(NULL, now)` 在 SQL 里是 NULL（不成立），只写第 1 条会让这类行
+ *      **永久停留在 processing**、再也不会被领取——消息静默卡死。
+ *      这正是"领取时先把状态置为 processing、再单独写租约"这个两段式的固有窗口。
+ *
+ * 之所以用 `received_at` 兜底而不是只看 NULL：极旧且租约为 NULL 的行也需要被清掉，
+ * 而新入库尚未领取的行状态是 `pending`，不会被这条谓词命中。
  */
 export async function reclaimExpiredLeases(now = new Date()): Promise<number> {
+  const graceCutoff = new Date(now.getTime() - INBOX_LEASE_MINUTES * 60_000);
   const rows = await db
     .update(wechatInbox)
     .set({ status: 'pending', leasedUntil: null })
-    .where(and(eq(wechatInbox.status, 'processing'), lt(wechatInbox.leasedUntil, now)))
+    .where(
+      and(
+        eq(wechatInbox.status, 'processing'),
+        or(
+          // 正常超时
+          and(isNotNull(wechatInbox.leasedUntil), lt(wechatInbox.leasedUntil, now)),
+          // 崩溃窗口：租约从未写入
+          and(isNull(wechatInbox.leasedUntil), lt(wechatInbox.receivedAt, graceCutoff)),
+        ),
+      ),
+    )
     .returning({ id: wechatInbox.id });
   return rows.length;
 }

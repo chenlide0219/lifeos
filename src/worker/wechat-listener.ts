@@ -13,10 +13,18 @@
  *   wechat-handler     → 真正的业务路由与状态机。
  *
  * 本文件不包含任何业务判断：不解析意图、不调用模型、不写业务表。
+ * 此外它负责**周期性维护**：回收崩溃遗留的租约、按保留期清理正文。
  */
 import { ilinkRequest } from '../server/lib/wechat-api';
 import { unseal, updateWechatState, readWechatState, type WechatCredentials } from '../server/lib/wechat-state';
-import { fingerprintOf, persistInbound, type InboundMessage } from '../server/lib/wechat-inbox';
+import {
+  fingerprintOf,
+  persistInbound,
+  purgeExpiredBodies,
+  reclaimExpiredLeases,
+  type InboundMessage,
+} from '../server/lib/wechat-inbox';
+import { purgeExpiredOutboxBodies } from '../server/lib/wechat-outbox';
 import { processInboxBatch } from '../server/lib/wechat-processor';
 import { sendPendingReplies } from './outbox-sender';
 
@@ -232,7 +240,10 @@ export function startWechatListener(): () => Promise<void> {
     // 心跳：接收循环本身没有日志，出问题时无法从日志判断"到底在不在轮询"。
     // 每 5 分钟打一条摘要，便于真机排查（默认关闭以外的细节不打印，避免刷屏）。
     const HEARTBEAT_MS = 5 * 60_000;
+    /** 维护任务（租约回收 + 正文清理）间隔；不必每轮都做 */
+    const MAINTENANCE_MS = 10 * 60_000;
     let lastHeartbeat = 0;
+    let lastMaintenance = 0;
     let rounds = 0;
     let insertedTotal = 0;
 
@@ -274,6 +285,25 @@ export function startWechatListener(): () => Promise<void> {
         await sendPendingReplies();
       } catch (err) {
         console.error('[worker] 回复发送异常:', (err as Error).message);
+      }
+
+      // 周期性维护：回收崩溃遗留的租约 + 按保留期清理正文。
+      // 这两件事原先只写在模块里、**没有任何调用者**，等于没有生效：
+      // 正文会无限增长，而崩溃在"置 processing"与"写租约"之间的消息会永久卡死。
+      if (Date.now() - lastMaintenance > MAINTENANCE_MS) {
+        lastMaintenance = Date.now();
+        try {
+          const reclaimed = await reclaimExpiredLeases();
+          const purged = await purgeExpiredBodies();
+          const purgedOutbox = await purgeExpiredOutboxBodies();
+          if (reclaimed > 0 || purged.inbox > 0 || purgedOutbox > 0) {
+            console.log(
+              `[worker] 维护：回收租约 ${reclaimed} 条，清理正文 inbox ${purged.inbox} / outbox ${purgedOutbox} 条`,
+            );
+          }
+        } catch (err) {
+          console.error('[worker] 维护任务异常:', (err as Error).message);
+        }
       }
 
       await pause();

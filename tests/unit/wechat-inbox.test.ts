@@ -333,6 +333,46 @@ describe('领取、终态与租约', () => {
     const counts = await inboxCounts();
     assert.equal(counts.pending, 1);
   });
+
+  it('租约为 NULL 的 processing 记录也必须被回收（SQL 的 NULL 比较陷阱）', async () => {
+    // 真实场景：领取时先置 processing，再单独写租约；进程恰好死在这两步之间，
+    // 于是 leased_until 为 NULL。`lt(NULL, now)` 在 SQL 里不成立，
+    // 只写"租约已过期"这一条谓词会让该行**永久卡死**、再也不会被领取。
+    await persistInbound({
+      generation: GENERATION,
+      messages: [message({ providerMessageId: 'm-null-lease' })],
+      receivedAt: new Date(Date.now() - 30 * 60_000),
+      cursor: null,
+      context: null,
+      boundUserId: USER,
+    });
+    await db.execute(
+      sql`UPDATE wechat_inbox SET status='processing', leased_until=NULL, attempts=1 WHERE provider_message_id='id:m-null-lease'`,
+    );
+
+    const reclaimed = await reclaimExpiredLeases();
+    assert.equal(reclaimed, 1, 'leased_until 为 NULL 的卡死记录必须被回收');
+
+    const counts = await inboxCounts();
+    assert.equal(counts.pending, 1);
+    assert.equal(counts.processing ?? 0, 0, '不得再有卡在 processing 的记录');
+  });
+
+  it('刚刚置为 processing 且租约为 NULL 的记录不立即回收（避免抢走在途处理）', async () => {
+    await persistInbound({
+      generation: GENERATION,
+      messages: [message({ providerMessageId: 'm-fresh-processing' })],
+      receivedAt: new Date(),
+      cursor: null,
+      context: null,
+      boundUserId: USER,
+    });
+    await db.execute(
+      sql`UPDATE wechat_inbox SET status='processing', leased_until=NULL WHERE provider_message_id='id:m-fresh-processing'`,
+    );
+    const reclaimed = await reclaimExpiredLeases();
+    assert.equal(reclaimed, 0, '新近的 processing 不应被误回收');
+  });
 });
 
 describe('正文保留期', () => {
