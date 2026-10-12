@@ -11,7 +11,7 @@
  * 发送计数**不在这里**：统一沿用既有 8/10 窗口实现（managed-wechat provider），
  * 避免出现两个各自计数的窗口。
  */
-import { and, asc, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { wechatOutbox } from '../db/schema';
 import { config } from '../config';
@@ -113,10 +113,15 @@ export async function claimOutboxBatch(limit = 3, now = new Date()): Promise<Pen
     if (ids.length === 0) return [];
 
     const leaseUntil = new Date(now.getTime() + OUTBOX_LEASE_MINUTES * 60_000);
+    // 用 inArray 绑定参数。
+    // 注意：不能写 `= ANY(${ids}::uuid[])`——pg 驱动会把 JS 数组序列化成
+    // **单个字符串**而不是数组字面量，运行期报 "malformed array literal"。
+    // 该写法曾在 inbox 的领取路径里留下同样的隐患（只是当时测试都在空集时提前返回）。
+    const claimedWhere = inArray(wechatOutbox.id, ids);
     await tx
       .update(wechatOutbox)
       .set({ status: 'sending', leasedUntil: leaseUntil, attempts: sql`${wechatOutbox.attempts} + 1` })
-      .where(sql`${wechatOutbox.id} = ANY(${ids}::uuid[])`);
+      .where(claimedWhere);
 
     return tx
       .select({
@@ -132,7 +137,7 @@ export async function claimOutboxBatch(limit = 3, now = new Date()): Promise<Pen
         createdAt: wechatOutbox.createdAt,
       })
       .from(wechatOutbox)
-      .where(sql`${wechatOutbox.id} = ANY(${ids}::uuid[])`)
+      .where(inArray(wechatOutbox.id, ids))
       .orderBy(asc(wechatOutbox.createdAt));
   });
 }
