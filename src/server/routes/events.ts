@@ -53,6 +53,13 @@ eventRoutes.get('/', requireAuth, async (c) =>
   guard(c, async () => {
     const from = optQueryInstant(c.req.query('from'), 'from');
     const to = optQueryInstant(c.req.query('to'), 'to');
+    const limitText = c.req.query('limit');
+    const offsetText = c.req.query('offset');
+    const limit = limitText === undefined ? 500 : Number(limitText);
+    const offset = offsetText === undefined ? 0 : Number(offsetText);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500 || !Number.isInteger(offset) || offset < 0) {
+      throw new ValidationError('分页参数无效');
+    }
 
     const conditions = [];
     if (from) conditions.push(gte(events.startAt, from));
@@ -62,10 +69,11 @@ eventRoutes.get('/', requireAuth, async (c) =>
       .select(SELECT_FIELDS)
       .from(events)
       .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(asc(events.startAt))
-      .limit(500);
+      .orderBy(asc(events.startAt), asc(events.id))
+      .limit(limit + 1)
+      .offset(offset);
 
-    return c.json({ events: rows });
+    return c.json({ events: rows.slice(0, limit), hasMore: rows.length > limit });
   }),
 );
 

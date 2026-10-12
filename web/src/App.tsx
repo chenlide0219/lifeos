@@ -6,6 +6,7 @@ import { useAuth } from './hooks/useAuth';
 import { AnalyticsPage } from './pages/Analytics';
 import { CalendarPage } from './pages/Calendar';
 import { DashboardPage } from './pages/Dashboard';
+import { EventsPage } from './pages/Events';
 import { LoginPage } from './pages/Login';
 import { SettingsPage } from './pages/Settings';
 import { SubscriptionsPage } from './pages/Subscriptions';
@@ -39,6 +40,7 @@ export function App() {
       >
         <Route path="/" element={<DashboardPage />} />
         <Route path="/calendar" element={<CalendarPage />} />
+        <Route path="/events" element={<EventsPage />} />
         <Route path="/todo" element={<TodoPage />} />
         <Route path="/subscriptions" element={<SubscriptionsPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />

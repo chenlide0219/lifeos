@@ -106,6 +106,22 @@ describe('认证中间件', () => {
 });
 
 describe('事件 CRUD 与提醒联动', () => {
+  it('事件列表分页可遍历全部记录，不会截断较新的事件', async () => {
+    for (const [hours, title] of [[1, '第一项'], [2, '第二项'], [3, '第三项']] as const) {
+      const created = await request('/api/events', {
+        method: 'POST',
+        body: JSON.stringify({ title, startAt: inHours(hours) }),
+      });
+      assert.equal(created.status, 201);
+    }
+    const first = await json<{ events: { title: string }[]; hasMore: boolean }>(await request('/api/events?limit=2&offset=0'));
+    const second = await json<{ events: { title: string }[]; hasMore: boolean }>(await request('/api/events?limit=2&offset=2'));
+    assert.deepEqual([...first.events, ...second.events].map((e) => e.title), ['第一项', '第二项', '第三项']);
+    assert.equal(first.hasMore, true);
+    assert.equal(second.hasMore, false);
+    assert.equal((await request('/api/events?limit=0')).status, 400);
+  });
+
   it('创建事件并排提醒，返回创建数量', async () => {
     const res = await request('/api/events', {
       method: 'POST',

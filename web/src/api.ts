@@ -374,12 +374,14 @@ export const api = {
     }>(`/notifications/test/${jobId}`),
 
   events: {
-    list: (range: { from?: string; to?: string } = {}) => {
+    list: (range: { from?: string; to?: string; limit?: number; offset?: number } = {}) => {
       const query = new URLSearchParams();
       if (range.from) query.set('from', range.from);
       if (range.to) query.set('to', range.to);
+      if (range.limit !== undefined) query.set('limit', String(range.limit));
+      if (range.offset !== undefined) query.set('offset', String(range.offset));
       const suffix = query.toString();
-      return request<{ events: EventDto[] }>(`/events${suffix ? `?${suffix}` : ''}`);
+      return request<{ events: EventDto[]; hasMore: boolean }>(`/events${suffix ? `?${suffix}` : ''}`);
     },
     get: (id: string) =>
       request<{ event: EventDto; reminders: unknown[]; rule: SubjectRule }>(`/events/${id}`),

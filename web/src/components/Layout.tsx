@@ -7,6 +7,7 @@ import {
   IconAnalytics,
   IconCalendar,
   IconDashboard,
+  IconEvent,
   IconLogout,
   IconMic,
   IconMonitor,
@@ -20,13 +21,14 @@ import {
 const NAV = [
   { to: '/', label: '总览', Icon: IconDashboard },
   { to: '/calendar', label: '日历', Icon: IconCalendar },
+  { to: '/events', label: '事件', Icon: IconEvent },
   { to: '/todo', label: '待办', Icon: IconTodo },
   { to: '/subscriptions', label: '订阅', Icon: IconSubscription },
   { to: '/analytics', label: '统计', Icon: IconAnalytics },
   { to: '/settings', label: '设置', Icon: IconSettings },
 ] as const;
 
-/** 移动端底部导航：5 项，设置从顶部入口进入 */
+/** 移动端底部导航：设置从顶部入口进入 */
 const MOBILE_NAV = NAV.filter((item) => item.to !== '/settings');
 
 function ThemeToggle({ compact = false }: { compact?: boolean }) {
@@ -152,19 +154,19 @@ export function Layout() {
 
       {/* ── 移动端底部导航 ── */}
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
-        <div className="grid grid-cols-5">
+        <div className="grid grid-cols-6">
           {MOBILE_NAV.map(({ to, label, Icon }) => (
             <NavLink
               key={to}
               to={to}
               end={to === '/'}
               className={({ isActive }) =>
-                `flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium transition-colors ${
+                `flex min-w-0 flex-col items-center gap-1 py-2.5 text-[10px] font-medium transition-colors ${
                   isActive ? 'text-brand' : 'text-muted'
                 }`
               }
             >
-              <Icon width={22} height={22} />
+              <Icon width={21} height={21} />
               <span>{label}</span>
             </NavLink>
           ))}
