@@ -5,11 +5,12 @@ import { QuickAddDialog } from '../components/QuickAdd';
 import { formatOffset } from '../components/ReminderOffsets';
 import { Alert, Card, EmptyState, PageHeader, Spinner } from '../components/ui';
 
-type Tab = 'all' | 'upcoming' | 'past' | 'cancelled';
+type Tab = 'all' | 'today' | 'upcoming' | 'past' | 'cancelled';
 type EventDetail = Awaited<ReturnType<typeof api.events.get>>;
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'all', label: '全部' },
+  { key: 'today', label: '今天' },
   { key: 'upcoming', label: '即将开始' },
   { key: 'past', label: '已过去' },
   { key: 'cancelled', label: '已取消' },
@@ -29,6 +30,7 @@ function formatDateTime(iso: string): string {
 
 export function EventsPage() {
   const [tab, setTab] = useState<Tab>('all');
+  const [now, setNow] = useState(() => Date.now());
   const [events, setEvents] = useState<EventDto[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,21 +63,39 @@ export function EventsPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const grouped = useMemo(() => {
-    const now = Date.now();
+    const shanghaiDate = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(now);
+    const part = (type: string) => shanghaiDate.find((item) => item.type === type)!.value;
+    const todayStart = Date.parse(`${part('year')}-${part('month')}-${part('day')}T00:00:00+08:00`);
+    const tomorrowStart = todayStart + 86_400_000;
+    const today: EventDto[] = [];
     const upcoming: EventDto[] = [];
     const past: EventDto[] = [];
     const cancelled: EventDto[] = [];
     for (const event of events) {
-      if (event.status === 'cancelled') cancelled.push(event);
-      else if (new Date(event.startAt).getTime() >= now) upcoming.push(event);
+      if (event.status === 'cancelled') {
+        cancelled.push(event);
+        continue;
+      }
+      const start = new Date(event.startAt).getTime();
+      const end = event.endAt ? new Date(event.endAt).getTime() : start;
+      if (start < tomorrowStart && (start >= todayStart || end > todayStart)) today.push(event);
+      if (start >= now) upcoming.push(event);
       else past.push(event);
     }
+    today.sort((a, b) => a.startAt.localeCompare(b.startAt));
     upcoming.sort((a, b) => a.startAt.localeCompare(b.startAt));
     past.sort((a, b) => b.startAt.localeCompare(a.startAt));
     cancelled.sort((a, b) => b.startAt.localeCompare(a.startAt));
-    return { all: [...upcoming, ...past, ...cancelled], upcoming, past, cancelled };
-  }, [events]);
+    return { all: [...upcoming, ...past, ...cancelled], today, upcoming, past, cancelled };
+  }, [events, now]);
 
   async function toggleDetail(event: EventDto) {
     if (detail?.event.id === event.id) {
@@ -144,8 +164,8 @@ export function EventsPage() {
         ) : shown.length === 0 ? (
           <EmptyState
             icon={<IconEvent width={28} height={28} />}
-            title={tab === 'all' ? '还没有事件' : tab === 'upcoming' ? '暂无即将开始的事件' : tab === 'past' ? '暂无过去的事件' : '暂无已取消的事件'}
-            description={tab === 'all' || tab === 'upcoming' ? '点击「新增事件」安排一件事。' : undefined}
+            title={tab === 'all' ? '还没有事件' : tab === 'today' ? '今天没有事件' : tab === 'upcoming' ? '暂无即将开始的事件' : tab === 'past' ? '暂无过去的事件' : '暂无已取消的事件'}
+            description={tab === 'all' || tab === 'today' || tab === 'upcoming' ? '点击「新增事件」安排一件事。' : undefined}
           />
         ) : (
           <ul className="divide-y divide-line">
