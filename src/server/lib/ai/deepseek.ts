@@ -67,6 +67,12 @@ export type ParseContext = {
   /** 当前时间（用于相对日期换算） */
   now: Date;
   timezone: string;
+  /**
+   * 覆盖默认 system prompt。
+   * V1.1 的草稿补丁与查询条件抽取需要不同的输出契约，
+   * 因此把提示词作为参数而不是复制一份客户端。
+   */
+  systemPrompt?: string;
 };
 
 export async function parseToDraft(context: ParseContext): Promise<ParseResult> {
@@ -99,7 +105,7 @@ export async function parseToDraft(context: ParseContext): Promise<ParseResult> 
         model,
         // 该模型会先输出 thinking 再输出正文，max_tokens 太小会被 thinking 吃光
         max_tokens: 2048,
-        system: SYSTEM_PROMPT,
+        system: context.systemPrompt ?? SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userPrompt }],
       }),
       signal: AbortSignal.timeout(Number(process.env.DEEPSEEK_TIMEOUT_MS ?? 60_000)),
@@ -123,6 +129,62 @@ export async function parseToDraft(context: ParseContext): Promise<ParseResult> 
     }
 
     return { ok: true, draft: normalizeDraft(parsed), raw: textBlock.text };
+  } catch (err) {
+    const message = (err as Error).message ?? String(err);
+    const isTimeout = /abort|timeout|timed out/i.test(message);
+    return { ok: false, kind: isTimeout ? 'timeout' : 'rejected', error: sanitize(message).slice(0, 200) };
+  }
+}
+
+/**
+ * 原始 JSON 调用：把 system prompt 与用户文本交给同一个 Anthropic 兼容端点，
+ * 返回**未经过草稿 schema 收窄**的解析结果。
+ *
+ * 为什么需要它：V1.1 的草稿补丁与查询条件抽取有各自的输出契约，
+ * 直接复用 `parseToDraft` 会让 `normalizeDraft` 把它们的字段丢掉。
+ */
+export async function callLlmRaw(
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<{ ok: true; object: Record<string, unknown>; raw: string } | { ok: false; kind: 'not_configured' | 'rejected' | 'timeout' | 'bad_output'; error: string }> {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    return { ok: false, kind: 'not_configured', error: '未配置 DEEPSEEK_API_KEY' };
+  }
+
+  const base = (process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com/anthropic').replace(/\/+$/, '');
+  try {
+    const response = await fetch(`${base}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: llmModel(),
+        max_tokens: 2048,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+      signal: AbortSignal.timeout(Number(process.env.DEEPSEEK_TIMEOUT_MS ?? 60_000)),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      return { ok: false, kind: 'rejected', error: `HTTP ${response.status}: ${sanitize(text).slice(0, 200)}` };
+    }
+
+    const payload = (await response.json()) as { content?: { type?: string; text?: string }[] };
+    const textBlock = payload.content?.find((b) => b.type === 'text' && typeof b.text === 'string');
+    if (!textBlock?.text) {
+      return { ok: false, kind: 'bad_output', error: '上游未返回正文内容' };
+    }
+    const object = extractJson(textBlock.text);
+    if (!object) {
+      return { ok: false, kind: 'bad_output', error: '上游返回的内容不是合法 JSON' };
+    }
+    return { ok: true, object, raw: textBlock.text };
   } catch (err) {
     const message = (err as Error).message ?? String(err);
     const isTimeout = /abort|timeout|timed out/i.test(message);
