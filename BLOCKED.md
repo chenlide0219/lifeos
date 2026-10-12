@@ -2,54 +2,6 @@
 
 > 记录具体缺口，不把「本机可达」当作「异机通路已通」，不绕过认证，不新建生产测试管理员。
 
-## B1：lisahost → cldvps 无任何通路（阻塞 A8 的异机段）
-
-**缺口**：异机备份要求由 lisahost 的定时任务直接加密上传到 cldvps，但 lisahost 上：
-
-- 无 `~/.ssh/config`，无任何私钥（仅 `authorized_keys`）；
-- 无法解析主机名 `cldvps`（`Temporary failure in name resolution`）。
-
-本机能连 cldvps（29G 空闲、有 gpg/rsync），但「本机 SSH 成功」不等于「异机备份已通」，
-且用户明确要求不依赖本人电脑在线。
-
-**已就绪的部分**（不依赖该通路，已实现并验证）：
-
-- 加密备份、本地 7 日/4 周轮转、权限 700/600；
-- 失败可见且非零退出；失败**不删除**最后一份可恢复副本；
-- 远端轮转只匹配 `lifeos-*.sql.gz.gpg`，不影响目标目录中的其他文件；
-- 上传后比对远端与本地文件大小，不一致即判失败。
-
-**解除所需**（一次性，需你确认后执行）：
-
-lisahost 上已生成专用 SSH 密钥（仅本机，未复制任何现有私钥）：
-
-```
-/root/.ssh/lifeos_backup_ed25519.pub
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAVFRQmLMAa+ATRTtdhTkjCUL4rkkZl7H9Hv518C+cqN lifeos-backup@C20260723239808
-```
-
-在 cldvps 上执行（最小权限：禁转发、禁 pty）：
-
-```bash
-install -d -m 700 /var/backups/lifeos/daily /var/backups/lifeos/weekly
-echo 'no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAVFRQmLMAa+ATRTtdhTkjCUL4rkkZl7H9Hv518C+cqN lifeos-backup@C20260723239808' >> /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-```
-
-然后在 lisahost 的 `/opt/lifeos/.env` 补一行，即自动生效、无需重启：
-
-```
-BACKUP_OFFSITE=root@<cldvps 地址>:/var/backups/lifeos
-```
-
-**注意**：GPG 解密私钥在 `/root/lifeos-backup-keys/lifeos-backup-private.asc`，
-请复制到你自己的密码管理器或离线介质，**不要**放在 cldvps 上。
-该私钥丢失 = 异机备份永久无法解密。
-
-# BLOCKED — 需要外部条件才能完成的项
-
-> 记录具体缺口，不把「本机可达」当作「异机通路已通」，不绕过认证，不新建生产测试管理员。
-
 ## ✅ 已解除：B1 lisahost → cldvps 异机备份通路（2026-10-12）
 
 **当时的缺口**：异机备份要求由 lisahost 的定时任务直接加密上传到 cldvps，
