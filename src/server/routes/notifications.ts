@@ -6,7 +6,7 @@ import { notificationAttempts, notificationJobs } from '../db/schema';
 import { getProviderStatuses } from '../lib/provider-status';
 import { rateLimit } from '../lib/ratelimit';
 import { clientIp, requireAuth, type AppEnv } from '../middleware/auth';
-import { listProviders } from '../../worker/registry';
+import { listProviders, refreshProviders } from '../../worker/registry';
 
 export const notificationRoutes = new Hono<AppEnv>();
 
@@ -35,6 +35,7 @@ notificationRoutes.post('/test', requireAuth, async (c) => {
     );
   }
 
+  await refreshProviders();
   const provider = listProviders()[0];
   if (!provider || !provider.isConfigured()) {
     return c.json(
@@ -47,6 +48,10 @@ notificationRoutes.post('/test', requireAuth, async (c) => {
       },
       503,
     );
+  }
+
+  if (provider.canSend && !provider.canSend()) {
+    return c.json({ error: 'wechat_paused', message: '微信发送已暂停，请在微信回复消息或发送 /refresh-context；测试消息未排队' }, 409);
   }
 
   const jobId = randomUUID();
@@ -121,6 +126,7 @@ notificationRoutes.get('/test/:jobId', requireAuth, async (c) => {
  * 这是 A7 要求的"错过记录必须可查询"的界面数据源。
  */
 notificationRoutes.get('/jobs', requireAuth, async (c) => {
+  await refreshProviders();
   const statusParam = c.req.query('status');
   const requested = (statusParam ?? '')
     .split(',')

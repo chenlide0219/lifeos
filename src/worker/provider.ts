@@ -21,6 +21,7 @@ export type SendFailureKind = 'retryable' | 'rejected' | 'needs_human' | 'unknow
 
 export type SendResult =
   | { ok: true; detail: string }
+  | { ok: false; kind: 'deferred'; error: string }
   | { ok: false; kind: SendFailureKind; error: string };
 
 /** 配置状态与实际连通状态分开报告，避免"填了环境变量"被当成"通道可用" */
@@ -40,6 +41,8 @@ export interface NotificationProvider {
   readonly channel: string;
   readonly name: string;
   isConfigured(): boolean;
+  refresh?(): Promise<void>;
+  canSend?(): boolean;
   describe(): ProviderStatus;
   /** 只读连通性探测：不发送任何消息 */
   probe(): Promise<ProviderStatus>;

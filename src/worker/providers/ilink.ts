@@ -42,7 +42,7 @@ type IlinkBody = {
   message_id?: unknown;
 };
 
-type ChunkOutcome =
+export type ChunkOutcome =
   | { kind: 'accepted'; detail: string }
   | { kind: 'auth_or_context'; detail: string }
   | { kind: 'business_error'; detail: string }
@@ -54,23 +54,28 @@ export class IlinkWechatProvider implements NotificationProvider {
   readonly channel = 'wechat';
   readonly name = '微信（iLink 发送通道）';
 
+  constructor(private readonly options?: {
+    credentials: { token: string; userId: string; baseUrl: string; contextToken: string };
+    onChunk?: (outcome: ChunkOutcome) => Promise<void>;
+  }) {}
+
   // 配置动态读取而非构造时快照：
   // 运维在 .env 补上凭据后，Worker 下一轮即可使用，无需重启；
   // 也让"渠道未配置 → 恢复"这一场景可被真实测试覆盖。
   private get baseUrl(): string {
-    return (process.env.ILINK_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+    return (this.options?.credentials.baseUrl || process.env.ILINK_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
   }
 
   private get token(): string {
-    return (process.env.ILINK_TOKEN ?? '').trim();
+    return (this.options?.credentials.token ?? process.env.ILINK_TOKEN ?? '').trim();
   }
 
   private get toUserId(): string {
-    return (process.env.ILINK_TO_USER_ID ?? '').trim();
+    return (this.options?.credentials.userId ?? process.env.ILINK_TO_USER_ID ?? '').trim();
   }
 
   private get contextToken(): string {
-    return (process.env.ILINK_CONTEXT_TOKEN ?? '').trim();
+    return (this.options?.credentials.contextToken ?? process.env.ILINK_CONTEXT_TOKEN ?? '').trim();
   }
 
   private get timeoutMs(): number {
@@ -160,9 +165,11 @@ export class IlinkWechatProvider implements NotificationProvider {
 
     const outcomes: ChunkOutcome[] = [];
     for (let i = 0; i < chunks.length; i++) {
-      outcomes.push(
-        await this.sendChunk(chunks[i]!, chunks.length > 1 ? `${baseClientId}#${i + 1}` : baseClientId),
-      );
+      const outcome = await this.sendChunk(chunks[i]!, chunks.length > 1 ? `${baseClientId}#${i + 1}` : baseClientId);
+      outcomes.push(outcome);
+      // Delivery already happened; accounting failures must never trigger a resend.
+      try { await this.options?.onChunk?.(outcome); }
+      catch { console.error('[wechat] 发送计数落库失败；保留预占的结果未知计数'); }
     }
 
     const accepted = outcomes.filter((o) => o.kind === 'accepted').length;
@@ -227,6 +234,7 @@ export class IlinkWechatProvider implements NotificationProvider {
         method: 'POST',
         headers: buildHeaders(this.token, body),
         body: JSON.stringify(body),
+        redirect: 'error',
         signal: AbortSignal.timeout(this.timeoutMs),
       });
 
@@ -318,7 +326,7 @@ function randomWechatUin(): string {
   return Buffer.from(String(uint32), 'utf-8').toString('base64');
 }
 
-function chunkText(text: string, limit: number): string[] {
+export function chunkText(text: string, limit = MAX_TEXT_CHARS): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
   let rest = text;

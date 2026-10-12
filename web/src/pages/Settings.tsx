@@ -3,6 +3,7 @@ import { ApiError, api, type SystemStatusResponse } from '../api';
 import { IconLogout } from '../components/Icons';
 import { NotificationLog } from '../components/NotificationLog';
 import { TestSendPanel } from '../components/TestSend';
+import { WechatBinding } from '../components/WechatBinding';
 import { Alert, Card, PageHeader, Spinner, StatusDot } from '../components/ui';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme, type ThemeMode } from '../hooks/useTheme';
@@ -192,6 +193,8 @@ export function SettingsPage() {
           </Card>
         </div>
       </div>
+
+      <div className="mt-4"><WechatBinding onChanged={() => void api.status().then(setStatus).catch(() => undefined)} /></div>
 
       <Card
         title="通知记录"

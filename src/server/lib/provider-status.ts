@@ -1,5 +1,5 @@
 import type { ProviderStatus } from '../../worker/provider';
-import { listProviders } from '../../worker/registry';
+import { listProviders, refreshProviders } from '../../worker/registry';
 
 /**
  * 渠道状态（含只读连通性探测）的带缓存实现。
@@ -16,8 +16,9 @@ export async function getProviderStatuses(options: { force?: boolean } = {}): Pr
   statuses: ProviderStatus[];
   probedAt: string;
 }> {
+  await refreshProviders();
   if (!options.force && cache && Date.now() - cache.at < PROBE_TTL_MS) {
-    return { statuses: cache.statuses, probedAt: new Date(cache.at).toISOString() };
+    return { statuses: listProviders().map(p => p.describe()), probedAt: new Date(cache.at).toISOString() };
   }
 
   // 并发请求合并为一次探测

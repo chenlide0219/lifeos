@@ -14,7 +14,7 @@ import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '../server/db/client';
 import { notificationAttempts, notificationJobs, notificationRules } from '../server/db/schema';
 import type { NotificationProvider, SendFailureKind } from './provider';
-import { getProvider, hasConfiguredProvider, unconfiguredDetail } from './registry';
+import { getProvider, hasConfiguredProvider, unconfiguredDetail, refreshProviders, listProviders } from './registry';
 
 export const BATCH_SIZE = Number(process.env.WORKER_BATCH ?? 10);
 export const LEASE_MINUTES = Number(process.env.WORKER_LEASE_MINUTES ?? 5);
@@ -256,7 +256,7 @@ async function releaseJob(jobId: string): Promise<void> {
     .where(eq(notificationJobs.id, jobId));
 }
 
-export type DispatchOutcome = 'sent' | 'retried' | 'failed';
+export type DispatchOutcome = 'sent' | 'retried' | 'failed' | 'released';
 
 export async function dispatch(
   job: ClaimedJob,
@@ -276,6 +276,11 @@ export async function dispatch(
     await markSent(job.id);
     console.log(`[worker] 已发送 ${job.id}（${job.subjectType}）: ${result.detail}`);
     return 'sent';
+  }
+
+  if (result.kind === 'deferred') {
+    await releaseJob(job.id);
+    return 'released';
   }
 
   await recordAttempt(job.id, false, result.error);
@@ -323,6 +328,9 @@ export async function tick(ctx: TickContext = { shuttingDown: false }): Promise<
     console.warn(`[worker] ${result.reclaimed} 条任务在发送中断，已标记为结果未知（不自动重发，需人工核实）`);
   }
 
+  await refreshProviders();
+  // A user-requested context pause retains pending reminders, including overdue ones.
+  if (listProviders().some(p => p.isConfigured() && p.canSend && !p.canSend())) return result;
   const configured = hasConfiguredProvider();
   result.missed = await markMissed(configured);
   if (result.missed > 0) {
@@ -363,6 +371,7 @@ export async function tick(ctx: TickContext = { shuttingDown: false }): Promise<
       const outcome = await dispatch(job, provider);
       if (outcome === 'sent') result.sent += 1;
       else if (outcome === 'retried') result.retried += 1;
+      else if (outcome === 'released') result.released += 1;
       else result.failed += 1;
     } catch (err) {
       const message = (err as Error).message ?? String(err);

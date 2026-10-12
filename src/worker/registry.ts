@@ -1,7 +1,11 @@
 import type { NotificationProvider, ProviderStatus } from './provider';
-import { IlinkWechatProvider } from './providers/ilink';
+import { ManagedWechatProvider } from './providers/managed-wechat';
 
-const providers: NotificationProvider[] = [new IlinkWechatProvider()];
+const providers: NotificationProvider[] = [new ManagedWechatProvider()];
+
+export async function refreshProviders(): Promise<void> {
+  for (const provider of providers) await provider.refresh?.();
+}
 
 export function getProvider(channel: string): NotificationProvider | undefined {
   return providers.find((p) => p.channel === channel);

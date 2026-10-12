@@ -8,6 +8,7 @@ import type { PoolClient } from 'pg';
 import { pool } from '../server/db/client';
 import { hasConfiguredProvider, unconfiguredDetail } from './registry';
 import { MISSED_AFTER_MINUTES, LEASE_MINUTES, tick, type TickContext } from './core';
+import { startWechatListener } from './wechat-listener';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_MS ?? 20_000);
 /** 退出时等待在途发送的上限；超过则如实标记，而不是静默丢弃 */
@@ -17,6 +18,7 @@ const SHUTDOWN_DRAIN_MS = 15_000;
 let lockClient: PoolClient | null = null;
 const ctx: TickContext = { shuttingDown: false };
 let tickInFlight: Promise<unknown> | null = null;
+let stopWechatListener: (() => Promise<void>) | null = null;
 
 async function sleepInterruptible(ms: number): Promise<void> {
   const deadline = Date.now() + ms;
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
     console.warn(`[worker] 当前通道未配置，不会领取发送任务：${unconfiguredDetail()}`);
   }
 
+  stopWechatListener = startWechatListener();
   await runLoop();
 }
 
@@ -84,6 +87,7 @@ async function shutdown(signal: string): Promise<void> {
     process.exit(1);
   }, SHUTDOWN_DRAIN_MS + 8_000);
   forceExit.unref();
+  await stopWechatListener?.();
 
   // 等待在途 tick 完成；tick 内单次发送有超时，因此等待是有界的
   const deadline = Date.now() + SHUTDOWN_DRAIN_MS;

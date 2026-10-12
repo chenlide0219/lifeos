@@ -11,7 +11,7 @@
  *   - 导出内容只包含业务数据本身。
  */
 import { Hono, type Context } from 'hono';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc, desc, eq, ne } from 'drizzle-orm';
 import { db } from '../db/client';
 import {
   csvImportBatches,
@@ -28,6 +28,7 @@ import {
 import { toCsv } from '../lib/csv';
 import { todayInTz } from '../lib/time';
 import { requireAuth, type AppEnv } from '../middleware/auth';
+import { WECHAT_STATE_KEY } from '../lib/wechat-state';
 
 export const exportRoutes = new Hono<AppEnv>();
 
@@ -153,7 +154,7 @@ exportRoutes.get('/data.json', requireAuth, async (c) => {
       createdAt: notificationJobs.createdAt,
     }).from(notificationJobs).orderBy(asc(notificationJobs.fireAt)),
     db.select().from(csvImportBatches).orderBy(asc(csvImportBatches.createdAt)),
-    db.select().from(settings),
+    db.select().from(settings).where(ne(settings.key, WECHAT_STATE_KEY)),
   ]);
 
   const payload = {
