@@ -19,6 +19,7 @@ import {
   type BillingConfig,
   type BillingPeriod,
 } from '../lib/billing';
+import { resolveCnyAmount } from '../lib/fx';
 import { todayInTz } from '../lib/time';
 import {
   assertCurrency,
@@ -532,8 +533,15 @@ subscriptionRoutes.post('/payments', requireAuth, async (c) =>
       if (!sub) return c.json({ error: 'invalid_request', message: '指定的订阅不存在' }, 400);
     }
 
-    const fxRate = optString(body.fxRate, '汇率', 32);
-    const isEstimatedFx = Boolean(body.isEstimatedFx);
+    // 人民币折算：优先用手动汇率（标记为「估算」），否则尝试配置的汇率源；
+    // 都拿不到就如实留空，绝不编造汇率（PRD FR-06）。
+    const fx = await resolveCnyAmount({
+      amount,
+      currency,
+      paidAt,
+      manualRate: optString(body.fxRate, '汇率', 32),
+      manualSource: optString(body.fxRateSource, '汇率来源', 64),
+    });
 
     const [created] = await db
       .insert(payments)
@@ -544,14 +552,11 @@ subscriptionRoutes.post('/payments', requireAuth, async (c) =>
         amount,
         currency,
         isRefund: optBoolean(body.isRefund, '退款标记', false),
-        fxRate,
-        fxRateSource: fxRate ? (optString(body.fxRateSource, '汇率来源', 64) ?? 'manual') : null,
-        fxRateDate: fxRate ? paidAt : null,
-        cnyAmount:
-          fxRate && currency !== 'CNY' && Number(fxRate) > 0
-            ? (Number(amount) * Number(fxRate)).toFixed(2)
-            : null,
-        isEstimatedFx: fxRate ? isEstimatedFx : false,
+        fxRate: fx.fxRate,
+        fxRateSource: fx.fxRateSource,
+        fxRateDate: fx.fxRate || fx.cnyAmount ? paidAt : null,
+        cnyAmount: fx.cnyAmount,
+        isEstimatedFx: fx.isEstimatedFx,
         paymentChannel: optString(body.paymentChannel, '支付渠道', 64),
         note: optString(body.note, '备注', 2000),
       })
