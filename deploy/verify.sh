@@ -170,10 +170,13 @@ head2 '通知渠道与策略'
 prov="$($PSQL -c "SELECT count(*) FROM notification_jobs;" 2>/dev/null || echo '?')"
 ok "notification_jobs 记录数：$prov"
 
-if grep -q '^ILINK_TOKEN=.\+' /opt/lifeos/.env 2>/dev/null; then
-  ok 'ILINK_TOKEN 已配置'
+wechat_bound="$($PSQL -c "SELECT count(*) FROM settings WHERE key='wechat.private-channel' AND coalesce(value->>'account','') <> '';" 2>/dev/null || echo '?')"
+if [ "$wechat_bound" = '1' ]; then
+  ok '微信扫码凭据已绑定（不读取或展示 token）'
+elif grep -q '^ILINK_TOKEN=.\+' /opt/lifeos/.env 2>/dev/null; then
+  ok 'ILINK_TOKEN 已通过旧式配置设置'
 else
-  note 'ILINK_TOKEN 未配置：Worker 不领取发送任务，超阈值将标 missed（见 BLOCKED.md）'
+  note '微信尚未扫码绑定：Worker 不领取发送任务，超阈值将标 missed（见 BLOCKED.md）'
 fi
 
 printf '\n════════════════════════════════════════════════\n'
