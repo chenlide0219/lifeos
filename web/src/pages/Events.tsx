@@ -149,9 +149,9 @@ export function EventsPage() {
             type="button"
             onClick={() => setTab(key)}
             aria-pressed={tab === key}
-            className={`flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tab === key ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'}`}
+            className={`flex-1 whitespace-nowrap rounded-lg px-1.5 py-2 text-xs font-medium transition-colors sm:px-3 sm:text-sm ${tab === key ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'}`}
           >
-            {label}<span className="ml-1.5 text-xs opacity-70">{grouped[key].length}</span>
+            {label}<span className="ml-1 text-[10px] opacity-70 sm:ml-1.5 sm:text-xs">{grouped[key].length}</span>
           </button>
         ))}
       </div>
