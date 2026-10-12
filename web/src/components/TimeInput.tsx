@@ -122,14 +122,18 @@ export function TimeInput({ value, onChange, id, ariaLabel, placeholder = 'HH mm
           onChange={(e) => {
             const next = e.target.value.replace(/\D/g, '').slice(0, 2);
             setHour(next);
-            emit(next, minute);
+            // 单数字仍在输入中，不把 "1" 提前写成 "01" 传给父表单。
+            if (next.length !== 1) emit(next, minute);
             if (next.length === 2 && Number(next) <= 23) minuteRef.current?.focus();
           }}
-          onBlur={() => {
+          onBlur={(e) => {
             setTouched(true);
             // 单数字补零：9 → 09
-            const padded = hour === '' ? '' : hour.padStart(2, '0');
-            if (padded !== hour) {
+            // 自动聚焦分钟会同步触发失焦；此处必须读输入框当前值，
+            // 不能读上一次渲染的 hour（可能仍为 "1"，从而把 "12" 覆盖成 "01"）。
+            const current = e.currentTarget.value;
+            const padded = current === '' ? '' : current.padStart(2, '0');
+            if (padded !== current) {
               setHour(padded);
               emit(padded, minute);
             }
@@ -153,12 +157,13 @@ export function TimeInput({ value, onChange, id, ariaLabel, placeholder = 'HH mm
           onChange={(e) => {
             const next = e.target.value.replace(/\D/g, '').slice(0, 2);
             setMinute(next);
-            emit(hour, next);
+            if (next.length !== 1) emit(hour, next);
           }}
-          onBlur={() => {
+          onBlur={(e) => {
             setTouched(true);
-            const padded = minute === '' ? '' : minute.padStart(2, '0');
-            if (padded !== minute) {
+            const current = e.currentTarget.value;
+            const padded = current === '' ? '' : current.padStart(2, '0');
+            if (padded !== current) {
               setMinute(padded);
               emit(hour, padded);
             }

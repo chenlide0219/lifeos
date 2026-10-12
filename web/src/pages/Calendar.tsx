@@ -188,6 +188,43 @@ export function CalendarPage() {
   }
 
   const selectedItems = byDate.get(selected) ?? [];
+  const mobileAgendaDates = view === 'month'
+    ? monthCells.filter((cell) => cell.inMonth && (byDate.get(cell.key)?.length ?? 0) > 0).map((cell) => cell.key)
+    : weekDays.filter((day) => (byDate.get(day.key)?.length ?? 0) > 0).map((day) => day.key);
+
+  function MobileAgenda() {
+    return (
+      <div className="border-t border-line px-4 py-4 sm:hidden">
+        <h3 className="mb-3 text-sm font-semibold">{view === 'month' ? '本月安排' : '本周安排'}</h3>
+        {mobileAgendaDates.length === 0 ? (
+          <p className="py-5 text-sm text-muted">这段时间没有安排</p>
+        ) : (
+          <div className="space-y-4">
+            {mobileAgendaDates.map((date) => (
+              <section key={date} id={`agenda-${date}`} className="scroll-mt-20">
+                <h4 className={`mb-1.5 text-sm font-medium ${date === todayKey ? 'text-brand' : 'text-ink'}`}>
+                  {date} · 周{WEEK_LABELS[(new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7]}
+                </h4>
+                <ul className="divide-y divide-line rounded-xl border border-line bg-surface px-3">
+                  {(byDate.get(date) ?? []).map((item) => (
+                    <li key={`${item.type}-${item.id}`} className="flex min-w-0 items-start gap-2.5 py-2.5">
+                      <span className="w-11 shrink-0 pt-0.5 text-xs tabular-nums text-muted">
+                        {item.allDay ? '全天' : item.time}
+                      </span>
+                      <TypeBadge type={item.type} />
+                      <span className={`min-w-0 flex-1 break-words text-sm leading-5 ${item.inactive ? 'text-muted line-through' : ''}`}>
+                        {item.title}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <>
@@ -291,8 +328,11 @@ export function CalendarPage() {
                   <button
                     key={cell.key}
                     type="button"
-                    onClick={() => setSelected(cell.key)}
-                    className={`min-h-[5.5rem] border-b border-r border-line p-1.5 text-left align-top transition-colors last:border-r-0 sm:min-h-[6.5rem] ${
+                    onClick={() => {
+                      setSelected(cell.key);
+                      document.getElementById(`agenda-${cell.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }}
+                    className={`min-h-[3.25rem] border-b border-r border-line p-1 text-left align-top transition-colors last:border-r-0 sm:min-h-[6.5rem] sm:p-1.5 ${
                       cell.inMonth ? '' : 'bg-canvas/40'
                     } ${isSelected ? 'ring-1 ring-inset ring-brand/40' : 'hover:bg-canvas/70'}`}
                     aria-label={`${cell.key}，${dayItems.length} 项`}
@@ -305,7 +345,13 @@ export function CalendarPage() {
                     >
                       {cell.day}
                     </div>
-                    <div className="space-y-0.5">
+                    <div className="flex flex-wrap gap-0.5 sm:hidden" aria-hidden="true">
+                      {dayItems.slice(0, 4).map((item) => (
+                        <span key={`${item.type}-${item.id}`} className={`h-1.5 w-1.5 rounded-full ${item.type === 'event' ? 'bg-event' : item.type === 'task' ? 'bg-task' : 'bg-subscription'}`} />
+                      ))}
+                      {dayItems.length > 4 ? <span className="text-[9px] leading-none text-muted">+{dayItems.length - 4}</span> : null}
+                    </div>
+                    <div className="hidden space-y-0.5 sm:block">
                       {dayItems.slice(0, 3).map((item) => (
                         <ItemChip key={`${item.type}-${item.id}`} item={item} compact />
                       ))}
@@ -317,20 +363,21 @@ export function CalendarPage() {
                 );
               })}
             </div>
+            <MobileAgenda />
           </>
         ) : null}
 
         {/* ── 周视图 ── */}
         {view === 'week' ? (
           <>
-            <div className="grid grid-cols-7 border-b border-line bg-canvas/50 text-center text-xs font-medium text-muted">
+            <div className="hidden grid-cols-7 border-b border-line bg-canvas/50 text-center text-xs font-medium text-muted sm:grid">
               {weekDays.map((d) => (
                 <div key={d.key} className="py-2">
                   {d.label}
                 </div>
               ))}
             </div>
-            <div className="grid grid-cols-7">
+            <div className="hidden grid-cols-7 sm:grid">
               {weekDays.map((d) => {
                 const dayItems = byDate.get(d.key) ?? [];
                 const isToday = d.key === todayKey;
@@ -365,6 +412,7 @@ export function CalendarPage() {
                 );
               })}
             </div>
+            <MobileAgenda />
           </>
         ) : null}
 
@@ -430,7 +478,7 @@ export function CalendarPage() {
 
       {/* 月/周视图下点击某天后展示该日明细 */}
       {view !== 'day' ? (
-        <Card title={`${selected} 的安排`} subtitle={`${selectedItems.length} 项`} className="mt-4">
+        <Card title={`${selected} 的安排`} subtitle={`${selectedItems.length} 项`} className="mt-4 hidden sm:block">
           {selectedItems.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted">这一天没有安排</p>
           ) : (

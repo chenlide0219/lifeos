@@ -121,6 +121,23 @@ export function VoiceCapture({
     }
   }
 
+  function switchKind(kind: AiDraft['kind']) {
+    if (!draft || draft.kind === kind) return;
+    if (kind === 'event') {
+      if (draft.due_date) setDraftStartDate(draft.due_date);
+      if (draft.due_time) setDraftStartTime(draft.due_time);
+    } else {
+      setDraft({
+        ...draft,
+        kind,
+        due_date: draftStartDate || draft.due_date,
+        due_time: draftStartTime || draft.due_time,
+      });
+      return;
+    }
+    setDraft({ ...draft, kind });
+  }
+
   async function confirmCreate() {
     if (!draft) return;
     setError(null);
@@ -331,7 +348,7 @@ export function VoiceCapture({
                   <button
                     key={k}
                     type="button"
-                    onClick={() => setDraft({ ...draft, kind: k })}
+                    onClick={() => switchKind(k)}
                     className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
                       draft.kind === k ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'
                     }`}
