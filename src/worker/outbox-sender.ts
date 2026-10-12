@@ -57,11 +57,12 @@ export async function sendPendingReplies(
   result.claimed = pending.length;
 
   for (const reply of pending) {
-    // 发送前复核：代际未变、草稿版本仍是最新
+    // 发送前复核：代际未变、草稿版本仍最新、且操作尚未结束
     const validity = await isReplyStillValid({
       bindingGeneration: reply.bindingGeneration,
       operationId: reply.operationId,
       operationVersion: reply.operationVersion,
+      replyType: reply.replyType,
     });
     if (!validity.valid) {
       await markOutboxSuppressed(reply.id, validity.reason ?? '回复已失效');

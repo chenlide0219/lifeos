@@ -143,15 +143,28 @@ export async function claimOutboxBatch(limit = 3, now = new Date()): Promise<Pen
 }
 
 /**
- * 发送前重新核对：代际是否仍是当前代际、操作版本是否仍是最新。
+ * 终态回执：用户必须知道的结果，**即使操作已结束也要送达**。
+ * 相对的，`preview` 是"待确认"、`notice` 是"延期/无法发出"之类；
+ * 操作结束后它们只会造成困惑（例如先收到「已创建」再收到矛盾的「待确认 XXX」）。
+ */
+const OUTCOME_REPLY_TYPES: ReadonlySet<string> = new Set(['created', 'cancelled', 'expired', 'error']);
+
+/**
+ * 发送前重新核对：代际是否仍是当前代际、草稿版本是否仍是最新、操作是否尚未结束。
  *
  * 这是"过时回复作废"的执行点：领取与发送之间可能发生换绑或草稿修改，
  * 所以**发送前**必须再查一次，而不是信任领取时的快照。
+ *
+ * ⚠️ 只比 `version` 是不够的：`commitOperation` **不递增版本**（它只改状态），
+ * 因此一条**尚未发出的预览**在提交后仍然"版本匹配"，会被当成有效回复发出去——
+ * 用户会先看到「已创建」，再收到一条矛盾的「待确认 XXX」。
+ * 所以命中终态操作时，只有**终态回执**仍然发送，其余一律作废。
  */
 export async function isReplyStillValid(reply: {
   bindingGeneration: string;
   operationId: string | null;
   operationVersion: number | null;
+  replyType?: string;
 }): Promise<{ valid: boolean; reason: string | null }> {
   const rows = await db.execute<{ generation: string | null; account: string | null }>(sql`
     SELECT value->>'generation' AS generation, value->>'account' AS account
@@ -162,13 +175,22 @@ export async function isReplyStillValid(reply: {
   if (row.generation !== reply.bindingGeneration) {
     return { valid: false, reason: '绑定已变更，旧回复作废' };
   }
-  if (reply.operationId && reply.operationVersion !== null) {
+  if (reply.operationId) {
     const opRows = await db.execute<{ version: number; status: string }>(sql`
       SELECT version, status FROM wechat_operations WHERE id = ${reply.operationId}
     `);
     const op = opRows.rows?.[0];
-    if (op && op.version !== reply.operationVersion) {
+    if (op && reply.operationVersion !== null && op.version !== reply.operationVersion) {
       return { valid: false, reason: '草稿已被新版本替代，旧预览作废' };
+    }
+    // 操作已结束：终态回执必须送达（用户必须知道结果），其余回复作废
+    const terminal = ['committed', 'cancelled', 'expired', 'invalidated'];
+    const isOutcome = reply.replyType !== undefined && OUTCOME_REPLY_TYPES.has(reply.replyType);
+    if (op && terminal.includes(op.status) && !isOutcome) {
+      return {
+        valid: false,
+        reason: `操作已结束（${op.status}），该回复已过时，不再发送`,
+      };
     }
   }
   return { valid: true, reason: null };

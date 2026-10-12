@@ -244,6 +244,7 @@ export function startWechatListener(): () => Promise<void> {
     const MAINTENANCE_MS = 10 * 60_000;
     let lastHeartbeat = 0;
     let lastMaintenance = 0;
+    let maintenanceRounds = 0;
     let rounds = 0;
     let insertedTotal = 0;
 
@@ -296,10 +297,16 @@ export function startWechatListener(): () => Promise<void> {
           const reclaimed = await reclaimExpiredLeases();
           const purged = await purgeExpiredBodies();
           const purgedOutbox = await purgeExpiredOutboxBodies();
+          maintenanceRounds += 1;
+          // 无论是否有变化都留痕：否则"维护还在不在跑"只能靠推测，
+          // 而它静默停止时不会有任何症状，直到表无限增长或消息卡死。
           if (reclaimed > 0 || purged.inbox > 0 || purgedOutbox > 0) {
             console.log(
-              `[worker] 维护：回收租约 ${reclaimed} 条，清理正文 inbox ${purged.inbox} / outbox ${purgedOutbox} 条`,
+              `[worker] 维护（第 ${maintenanceRounds} 轮）：回收租约 ${reclaimed} 条，清理正文 inbox ${purged.inbox} / outbox ${purgedOutbox} 条`,
             );
+          } else if (maintenanceRounds === 1 || maintenanceRounds % 12 === 0) {
+            // 首次与之后每约 2 小时记一次（10 分钟 × 12），避免每分钟刷屏
+            console.log(`[worker] 维护（第 ${maintenanceRounds} 轮）：无待回收或待清理记录`);
           }
         } catch (err) {
           console.error('[worker] 维护任务异常:', (err as Error).message);
