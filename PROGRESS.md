@@ -523,3 +523,18 @@ cd /opt/lifeos && sudo -E node --import tsx --test tests/unit/fx.test.ts
 - 全量：**179 项，0 失败 0 跳过 0 todo**
 - 服务器与仓库代码已对齐（重新全量部署 + 重启 + 自检）
 - `PROGRESS.md` 上文"未决事项"一节所描述的回滚与不一致**已消除**
+
+## 收尾对齐（本次提交）
+
+- **服务器与仓库逐文件哈希比对：完全一致**（同名文件内容相同、无单侧缺失）。
+  比对脚本需注意 Git Bash 的 `sha256sum` 用 `*` 标记二进制模式，与 Linux 输出格式不同，
+  直接 diff 会产生全量假差异。
+- 服务器上生成的两个 PWA 图标（`icon-192.png` / `icon-512.png`）纳入仓库，
+  使干净检出无需先跑图标脚本即可构建。
+- 服务重启后自检通过，汇率模块随付款记账路径生效，
+  `/api/subscriptions/payments` 未登录返回 401（受认证保护）。
+
+```
+npm test → 179 项，0 失败 0 跳过 0 todo
+sudo bash deploy/verify.sh → 线上 33 通过 / 0 失败 / 2 提示
+```
