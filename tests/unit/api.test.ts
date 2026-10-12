@@ -76,7 +76,13 @@ describe('认证中间件', () => {
     const saved = cookie;
     cookie = '';
     try {
-      for (const path of ['/api/events', '/api/tasks?view=today', '/api/calendar']) {
+      for (const path of [
+        '/api/events',
+        '/api/tasks?view=today',
+        '/api/calendar',
+        // V1.1 助手状态同样受保护：它含草稿标题与操作结果
+        '/api/wechat/assistant',
+      ]) {
         const res = await request(path);
         assert.equal(res.status, 401, `${path} 应要求登录`);
       }
@@ -531,5 +537,39 @@ describe('日历聚合读视图', () => {
       '逾期未完成的待办必须出现在总览里',
     );
     assert.ok(!body.tasksDueToday.some((t) => t.title === '无日期'), '无日期待办留在待办页收件箱');
+  });
+});
+
+describe('V1.1 助手状态端点', () => {
+  it('已登录时返回草稿、最近操作、计数与开关，且不含凭据', async () => {
+    const res = await request('/api/wechat/assistant');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+
+    // 契约字段齐备
+    for (const key of [
+      'inboundEnabled',
+      'modelCallsEnabled',
+      'draft',
+      'recent',
+      'recentReplies',
+      'inboundCounts',
+      'outboxCounts',
+      'listenerAt',
+      'listenerError',
+    ]) {
+      assert.ok(key in body, `缺少字段 ${key}`);
+    }
+
+    assert.equal(typeof body.inboundEnabled, 'boolean');
+    assert.equal(typeof body.modelCallsEnabled, 'boolean');
+    assert.ok(Array.isArray(body.recent));
+    assert.ok(Array.isArray(body.recentReplies));
+    assert.equal(typeof body.inboundCounts, 'object');
+
+    // 绝不能泄漏凭据或私有状态
+    const text = JSON.stringify(body);
+    assert.doesNotMatch(text, /bot_token|account|context|Authorization|Bearer/i, '不得包含凭据字段');
+    assert.doesNotMatch(text, /apikey_/, '不得包含密钥');
   });
 });

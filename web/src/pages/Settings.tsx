@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError, api, type SystemStatusResponse } from '../api';
+import { AssistantStatus } from '../components/AssistantStatus';
 import { IconLogout } from '../components/Icons';
 import { NotificationLog } from '../components/NotificationLog';
 import { TestSendPanel } from '../components/TestSend';
@@ -195,6 +196,8 @@ export function SettingsPage() {
       </div>
 
       <div className="mt-4"><WechatBinding onChanged={() => void api.status().then(setStatus).catch(() => undefined)} /></div>
+
+      <div className="mt-4"><AssistantStatus /></div>
 
       <Card
         title="通知记录"

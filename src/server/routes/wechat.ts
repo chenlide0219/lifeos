@@ -1,9 +1,14 @@
 import { Hono } from 'hono';
 import crypto from 'node:crypto';
 import QRCode from 'qrcode';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { db } from '../db/client';
+import { wechatOperations, wechatOutbox } from '../db/schema';
 import { requireAuth, type AppEnv } from '../middleware/auth';
 import { rateLimit } from '../lib/ratelimit';
 import { bindWechat, emptyWechatState, publicWechatState, readWechatState, updateWechatState } from '../lib/wechat-state';
+import { inboxCounts } from '../lib/wechat-inbox';
+import { outboxCounts } from '../lib/wechat-outbox';
 import { ILINK_LOGIN_BASE, ilinkRequest, trustedIlinkBase } from '../lib/wechat-api';
 
 export const wechatRoutes = new Hono<AppEnv>();
@@ -13,6 +18,115 @@ let login: Login | null = null;
 function view(l: Login) { return { id: l.id, image: l.image, status: l.status, expiresAt: new Date(l.expires).toISOString() }; }
 wechatRoutes.use('*', requireAuth);
 wechatRoutes.get('/', async c => c.json(publicWechatState(await readWechatState())));
+
+/**
+ * V1.1 助手状态（设置页展示）。
+ *
+ * 只暴露**可公开的运营信息**：当前草稿的标题/短码/状态、最近操作的终态、
+ * 入站与出站的计数分布。不含正文以外的任何私有数据，也不含凭据。
+ *
+ * 用途：真机排查时能直接看到"消息有没有进来""草稿建了没有""回复发出去了没有"，
+ * 而不必登录服务器查库。
+ */
+wechatRoutes.get('/assistant', requireAuth, async (c) => {
+  const state = await readWechatState();
+  const generation = state.generation;
+
+  const [draft] = await db
+    .select({
+      id: wechatOperations.id,
+      status: wechatOperations.status,
+      shortCode: wechatOperations.shortCode,
+      version: wechatOperations.version,
+      draft: wechatOperations.draft,
+      missingFields: wechatOperations.missingFields,
+      expiresAt: wechatOperations.expiresAt,
+      updatedAt: wechatOperations.updatedAt,
+    })
+    .from(wechatOperations)
+    .where(
+      and(
+        eq(wechatOperations.bindingGeneration, generation),
+        inArray(wechatOperations.status, ['awaiting_fields', 'pending_confirm', 'committing']),
+      ),
+    )
+    .limit(1);
+
+  const recent = await db
+    .select({
+      id: wechatOperations.id,
+      status: wechatOperations.status,
+      draftKind: wechatOperations.draftKind,
+      draft: wechatOperations.draft,
+      resultSubjectType: wechatOperations.resultSubjectType,
+      resultSubjectId: wechatOperations.resultSubjectId,
+      updatedAt: wechatOperations.updatedAt,
+    })
+    .from(wechatOperations)
+    .where(eq(wechatOperations.bindingGeneration, generation))
+    .orderBy(desc(wechatOperations.updatedAt))
+    .limit(8);
+
+  const recentReplies = await db
+    .select({
+      id: wechatOutbox.id,
+      replyType: wechatOutbox.replyType,
+      status: wechatOutbox.status,
+      failureKind: wechatOutbox.failureKind,
+      operationId: wechatOutbox.operationId,
+      sentAt: wechatOutbox.sentAt,
+      createdAt: wechatOutbox.createdAt,
+      lastError: wechatOutbox.lastError,
+    })
+    .from(wechatOutbox)
+    .orderBy(desc(wechatOutbox.createdAt))
+    .limit(10);
+
+  return c.json({
+    // 输入开关：关闭时业务输入不处理，但主动提醒照常
+    inboundEnabled: (process.env.WECHAT_INBOUND_ENABLED ?? '1') !== '0',
+    modelCallsEnabled: (process.env.WECHAT_MODEL_CALLS ?? '1') !== '0',
+    draft: draft
+      ? {
+          id: draft.id,
+          status: draft.status,
+          shortCode: draft.shortCode,
+          version: draft.version,
+          title: draftTitle(draft.draft),
+          kind: draftKindOf(draft.draft),
+          missingFields: Array.isArray(draft.missingFields) ? draft.missingFields : [],
+          expiresAt: draft.expiresAt,
+          updatedAt: draft.updatedAt,
+        }
+      : null,
+    recent: recent.map((row) => ({
+      id: row.id,
+      status: row.status,
+      title: draftTitle(row.draft),
+      kind: row.draftKind ?? draftKindOf(row.draft),
+      resultSubjectType: row.resultSubjectType,
+      resultSubjectId: row.resultSubjectId,
+      updatedAt: row.updatedAt,
+    })),
+    recentReplies,
+    inboundCounts: await inboxCounts(),
+    outboxCounts: await outboxCounts(),
+    listenerAt: state.listenerAt ? new Date(state.listenerAt).toISOString() : null,
+    listenerError: state.listenerError,
+  });
+});
+
+function draftTitle(draft: unknown): string | null {
+  if (!draft || typeof draft !== 'object') return null;
+  const title = (draft as Record<string, unknown>).title;
+  return typeof title === 'string' && title.trim() ? title : null;
+}
+
+function draftKindOf(draft: unknown): string | null {
+  if (!draft || typeof draft !== 'object') return null;
+  const kind = (draft as Record<string, unknown>).kind;
+  return kind === 'event' || kind === 'task' ? kind : null;
+}
 wechatRoutes.post('/login', async c => {
   const limited = rateLimit('wechat-login', 10, 10 * 60_000);
   if (!limited.ok) return c.json({ error: 'rate_limited', message: '获取二维码过于频繁，请稍后再试' }, 429);
