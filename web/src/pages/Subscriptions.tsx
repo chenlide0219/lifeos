@@ -236,7 +236,18 @@ export function SubscriptionsPage() {
       <div className="mb-4 grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-line bg-surface px-4 py-3.5">
           <p className="text-xs font-medium text-muted">预计月均支出（口径一）</p>
-          <p className="mt-1 text-2xl font-semibold tracking-tight">{summary?.expectedMonthly ?? '—'}</p>
+          {summary && Object.keys(summary.expected.monthlyByCurrency).length > 0 ? (
+            // 按币种分列：跨币种相加的数字没有意义，裸数字还会被误读为人民币
+            <ul className="mt-1 space-y-0.5">
+              {Object.entries(summary.expected.monthlyByCurrency).map(([currency, amount]) => (
+                <li key={currency} className="text-2xl font-semibold tracking-tight">
+                  {amount.toFixed(2)} <span className="text-sm font-normal text-muted">{currency}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1 text-2xl font-semibold tracking-tight">—</p>
+          )}
           <p className="mt-1 text-xs text-muted">{summary?.expected.monthlyTotalNote ?? '按当前周期折算，与实付不混算'}</p>
         </div>
         <div className="rounded-2xl border border-line bg-surface px-4 py-3.5">

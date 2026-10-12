@@ -181,14 +181,26 @@ export function DashboardPage() {
             </div>
           ) : (
             <dl className="space-y-3 text-sm">
-              <div className="flex items-baseline justify-between gap-3">
+              <div>
                 <dt className="text-muted">
                   预计月均支出
                   <span className="ml-1 text-xs">（按当前周期折算）</span>
                 </dt>
-                <dd className="text-lg font-semibold">
-                  {summary.expectedMonthly}
-                  <span className="ml-1 text-xs font-normal text-muted">人民币口径见统计页</span>
+                <dd className="mt-1">
+                  {Object.keys(summary.expected.monthlyByCurrency).length === 0 ? (
+                    <span className="text-sm text-muted">暂无订阅</span>
+                  ) : (
+                    // 必须按币种分列：跨币种相加得到的数字没有任何意义，
+                    // 而"40.00"这种不带币种的裸数字会被误读为人民币
+                    <ul className="space-y-0.5">
+                      {Object.entries(summary.expected.monthlyByCurrency).map(([currency, amount]) => (
+                        <li key={currency} className="text-right">
+                          <span className="text-lg font-semibold">{amount.toFixed(2)}</span>
+                          <span className="ml-1 text-xs font-normal text-muted">{currency}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </dd>
               </div>
 
