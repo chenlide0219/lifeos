@@ -90,8 +90,28 @@ done
 # ── 6. 数据库不变量 ────────────────────────────────────────────
 head2 '数据库不变量'
 PSQL='sudo -n -u postgres psql -d lifeos -tA'
+# 表数量断言改为"必需表清单 + 下限"。
+# 原先硬编码 `= 14`，V1.1 新增三张 wechat_* 表后必然误报
+# （自检本应发现结构缺失，而不是因为**新增**表而失败）。
+REQUIRED_TABLES='admin_users audit_logs csv_import_batches events expected_bills notification_attempts notification_jobs notification_rules payments sessions settings subscription_price_history subscriptions tasks wechat_inbox wechat_operations wechat_outbox'
 tables="$($PSQL -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null || echo '?')"
-[ "$tables" = "14" ] && ok '生产库 14 张表' || bad "生产库表数量异常：$tables"
+missing_tables=''
+for t in $REQUIRED_TABLES; do
+  exists="$($PSQL -c "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='$t';" 2>/dev/null || echo '')"
+  [ "$exists" = "1" ] || missing_tables="$missing_tables $t"
+done
+required_count="$(printf '%s\n' $REQUIRED_TABLES | wc -l | tr -d ' ')"
+if [ -n "$missing_tables" ]; then
+  bad "生产库缺少必需表：$missing_tables"
+elif [ "$tables" -lt "$required_count" ] 2>/dev/null; then
+  bad "生产库表数量异常：$tables（至少应有 $required_count 张）"
+else
+  ok "生产库表结构完整（$tables 张，必需 $required_count 张齐备）"
+fi
+
+# V1.1：活动草稿的偏唯一索引是"同时最多一个草稿"的数据库级保证
+op_uq="$($PSQL -c "SELECT 1 FROM pg_indexes WHERE indexname='wechat_operations_active_uq';" 2>/dev/null || echo '')"
+[ "$op_uq" = "1" ] && ok 'wechat_operations 活动草稿唯一索引存在' || bad '缺少 wechat_operations_active_uq（同时最多一个草稿失去数据库保证）'
 
 admins="$($PSQL -c 'SELECT count(*) FROM admin_users;' 2>/dev/null || echo '?')"
 [ "$admins" = "1" ] && ok '管理员数量为 1（未新增、未重建）' || bad "管理员数量异常：$admins"

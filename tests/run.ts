@@ -80,6 +80,22 @@ function main(): void {
         : 1;
   }
 
+  /**
+   * 3b) 恢复测试库 schema。
+   *
+   * `tests/unit/migrations.test.ts` 会 `DROP SCHEMA public CASCADE` 来验证
+   * "空库从零迁移"，但它自己结束时并不保证 schema 处于有表状态
+   * （最后一次可能是"既有库升级"用例留下的结构，也可能是空库）。
+   *
+   * 后面的 shell 演练（`t-backup-a8.sh`）会**备份测试库并断言解密后含建表语句**，
+   * 因此必须先确保测试库有完整结构，否则会得到一个与代码无关的假失败。
+   * 这里重跑一次迁移（幂等），把 schema 恢复到已知良好状态。
+   */
+  failed +=
+    run('恢复测试库 schema', process.execPath, ['--import', 'tsx', 'src/scripts/migrate.ts']) === 0
+      ? 0
+      : 1;
+
   // 4) shell 级验证
   const shellRunner = path.join(ROOT, 'tests', 'shell', 'run-all.sh');
   if (existsSync(shellRunner)) {

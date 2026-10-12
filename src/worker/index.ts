@@ -6,7 +6,7 @@
  */
 import type { PoolClient } from 'pg';
 import { pool } from '../server/db/client';
-import { hasConfiguredProvider, unconfiguredDetail } from './registry';
+import { hasConfiguredProvider, refreshProviders, unconfiguredDetail } from './registry';
 import { MISSED_AFTER_MINUTES, LEASE_MINUTES, tick, type TickContext } from './core';
 import { startWechatListener } from './wechat-listener';
 
@@ -68,6 +68,20 @@ async function main(): Promise<void> {
   console.log(
     `[worker] 已启动：轮询 ${POLL_INTERVAL_MS}ms，错过阈值 ${MISSED_AFTER_MINUTES} 分钟，租约 ${LEASE_MINUTES} 分钟`,
   );
+
+  /**
+   * 启动横幅必须先刷新渠道状态。
+   *
+   * `ManagedWechatProvider` 的内部状态初值为 `emptyWechatState()`，
+   * 而 `isConfigured()` 读的就是它；不先 `refresh()` 就判断，
+   * 即使数据库里已扫码绑定也会误报"未扫码绑定"（真实发生过的启动误导）。
+   * `refresh()` 只读设置表，无网络副作用，因此放在启动路径是安全的。
+   */
+  try {
+    await refreshProviders();
+  } catch (err) {
+    console.warn('[worker] 启动时刷新渠道状态失败，将在轮询中重试:', (err as Error).message);
+  }
   if (!hasConfiguredProvider()) {
     console.warn(`[worker] 当前通道未配置，不会领取发送任务：${unconfiguredDetail()}`);
   }
