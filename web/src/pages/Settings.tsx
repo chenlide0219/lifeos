@@ -204,11 +204,27 @@ export function SettingsPage() {
         <NotificationLog />
       </Card>
 
-      <Card title="数据管理" subtitle="备份与导出" className="mt-4">
-        <ul className="space-y-2 text-sm text-muted">
-          <li>· 数据库每日自动备份并保留历史副本，具体策略见服务器上的备份脚本。</li>
-          <li>· 订阅 / 付款 CSV 导出与完整业务数据 JSON 导出将在阶段 6 提供界面入口。</li>
-          <li>· 日志与通知记录中不保存明文口令、完整 token、微信会话凭证和原始语音。</li>
+      <Card title="数据管理" subtitle="导出与备份" className="mt-4">
+        <div className="flex flex-wrap gap-2">
+          {[
+            { href: '/api/export/subscriptions.csv', label: '导出订阅 CSV' },
+            { href: '/api/export/payments.csv', label: '导出付款 CSV' },
+            { href: '/api/export/data.json', label: '导出完整数据 JSON' },
+          ].map((item) => (
+            <a key={item.href} href={item.href} download className="btn-ghost">
+              {item.label}
+            </a>
+          ))}
+        </div>
+
+        <ul className="mt-4 space-y-2 text-sm text-muted">
+          <li>· CSV 为 UTF-8 带 BOM，Excel 打开中文不乱码；以 = + - @ 开头的单元格会加前导单引号，防止被当作公式执行。</li>
+          <li>· 完整数据 JSON 包含事件、待办、订阅、预计账单、付款、通知任务与设置。</li>
+          <li>
+            · <strong>导出中不包含任何凭据材料</strong>：密码哈希、会话令牌、审计日志与发送尝试记录一律排除，
+            避免备份文件在邮箱或网盘流转时泄露。
+          </li>
+          <li>· 数据库每日自动加密备份并保留历史副本，策略见服务器上的备份脚本。</li>
         </ul>
       </Card>
     </>

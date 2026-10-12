@@ -314,3 +314,43 @@ export function hashCsv(text: string): string {
   }
   return hash.toString(16).padStart(8, '0');
 }
+
+/**
+ * CSV 单元格转义（RFC 4180）。
+ *
+ * 额外做**公式注入防护**：以 = + - @ 或制表符/回车开头的值，在 Excel / WPS 中会被
+ * 当作公式执行（例如 `=HYPERLINK(...)`、`=cmd|...`）。导出文件往往会被下载后直接打开，
+ * 因此这里统一加前导单引号，使其只能作为文本显示。
+ */
+function escapeCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+
+  let text = typeof value === 'string' ? value : String(value);
+
+  // 公式注入防护：先加前导单引号，再做常规转义
+  if (/^[=+\-@\t\r]/.test(text)) {
+    text = `'${text}`;
+  }
+
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+/**
+ * 生成 CSV 文本。
+ * `bom: true` 会在开头写入 UTF-8 BOM —— Excel 打开含中文的 CSV 时不会乱码，
+ * 缺了它用户会看到一片问号。
+ */
+export function toCsv(
+  header: string[],
+  rows: unknown[][],
+  options: { bom?: boolean } = {},
+): string {
+  const lines = [header.map(escapeCell).join(',')];
+  for (const row of rows) lines.push(row.map(escapeCell).join(','));
+  // 用 CRLF 结尾：Excel 与多数表格工具对此兼容性最好
+  const body = `${lines.join('\r\n')}\r\n`;
+  return options.bom === false ? body : `﻿${body}`;
+}

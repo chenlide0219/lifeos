@@ -13,6 +13,7 @@ import { authRoutes } from './routes/auth';
 import { calendarRoutes } from './routes/calendar';
 import { csvRoutes } from './routes/csv-import';
 import { eventRoutes } from './routes/events';
+import { exportRoutes } from './routes/export';
 import { healthRoutes } from './routes/health';
 import { notificationRoutes } from './routes/notifications';
 import { statusRoutes } from './routes/status';
@@ -61,6 +62,7 @@ export function createApp(): Hono {
   api.route('/voice', voiceRoutes);
   api.route('/subscriptions', subscriptionRoutes);
   api.route('/imports', csvRoutes);
+  api.route('/export', exportRoutes);
 
   app.route('/api', api);
 
