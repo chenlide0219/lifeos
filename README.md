@@ -133,6 +133,32 @@ ssh lisahost "sudo systemctl restart lifeos-api lifeos-worker"
 ssh lisahost "sudo bash /opt/lifeos/deploy/verify.sh"
 ```
 
+### ⚠️ 服务器 `.env` 的配置项必须在部署时人工确认
+
+`.env` **不随代码同步**，因此**新增配置项很容易漏掉**，而漏掉往往是静默的。
+V1.1 上线时就发生过一次：服务器只有官方 Jev key、**没有任何中转配置**，
+于是文档承诺的"官方不可用时回退中转"在线上**根本不存在**——
+官方端点一旦失效就整体不可用，而且没有任何报错提示。
+
+因此每次部署后，用这条**只列键名与长度、不显示值**的命令核对：
+
+```bash
+ssh lisahost "awk -F= '/^(JEV_|WECHAT_|ILINK_|DEEPSEEK_|MIMO_|BACKUP_)/{print \$1\" 长度=\"length(\$2)}' /opt/lifeos/.env"
+```
+
+V1.1 起必须存在的项：
+
+| 键 | 作用 | 缺失后果 |
+| --- | --- | --- |
+| `JEV_OFFICIAL_API_KEY` | Jev 官方端点（首选） | 自然语言创建/查询不可用（确定性命令仍可用） |
+| `JEV_BASE_URL` + `JEV_API_KEY` | Jev 中转（官方失效时回退） | **回退路径不存在**，官方一挂就整体不可用 |
+| `DEEPSEEK_API_KEY` | 字段抽取与草稿补丁 | 无法把一句话解析成草稿 |
+| `WECHAT_INBOUND_ENABLED` | 业务输入开关（默认 1） | 设 0 时不处理微信输入，**主动提醒不受影响** |
+| `WECHAT_MODEL_CALLS` | 模型调用开关（默认 1） | 设 0 时仅确定性命令可用；**生产不应为 0** |
+
+写入方式建议 base64 经 stdin + `python` 插入，**避免密钥出现在命令行历史或进程列表**；
+写入前备份原文件，写入后 `chmod 600`。
+
 ### ⚠️ 迁移文件的权威来源是 Git 仓库
 
 **绝不要在服务器上 `npm run db:generate` 后不同步回仓库。** 曾经因此发生过：

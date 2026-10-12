@@ -185,7 +185,41 @@ else
   note '未配置 BACKUP_OFFSITE —— 本地加密备份已完成，异机段见 BLOCKED.md'
 fi
 
-# ── 9. 通知渠道与策略 ──────────────────────────────────────────
+# ── 9. V1.1 关键配置是否齐备 ───────────────────────────────────
+#
+# 存在的理由：`.env` 不随代码同步，新增配置项极易静默漏掉。
+# V1.1 上线时服务器只有官方 Jev key、没有任何中转配置，导致文档承诺的
+# "官方不可用时回退中转"在线上**根本不存在**，且没有任何报错提示。
+# 这里把"静默缺失"变成显式检查。
+head2 'V1.1 关键配置'
+env_has() { grep -qE "^$1=.+" /opt/lifeos/.env 2>/dev/null; }
+
+if env_has 'JEV_OFFICIAL_API_KEY'; then
+  ok 'Jev 官方密钥已配置'
+  if env_has 'JEV_BASE_URL' && env_has 'JEV_API_KEY'; then
+    ok 'Jev 中转已配置（官方失效时可回退）'
+  else
+    bad '缺少 Jev 中转配置（JEV_BASE_URL / JEV_API_KEY）：官方端点一旦失效将无法回退，自然语言功能整体不可用'
+  fi
+else
+  bad '缺少 JEV_OFFICIAL_API_KEY：自然语言创建与查询不可用（确定性命令仍可用）'
+fi
+
+env_has 'DEEPSEEK_API_KEY' && ok 'DeepSeek 已配置' || bad '缺少 DEEPSEEK_API_KEY：无法把一句话解析成草稿'
+
+# 开关状态：关闭是合法运维手段，但要显式提示影响范围
+if grep -qE '^WECHAT_INBOUND_ENABLED=0' /opt/lifeos/.env 2>/dev/null; then
+  note 'WECHAT_INBOUND_ENABLED=0：微信业务输入已关闭（主动提醒不受影响）'
+else
+  ok '业务输入开关为开启状态'
+fi
+if grep -qE '^WECHAT_MODEL_CALLS=0' /opt/lifeos/.env 2>/dev/null; then
+  bad 'WECHAT_MODEL_CALLS=0：模型调用被关闭，生产环境不应如此（自然语言路径不可用）'
+else
+  ok '模型调用开关为开启状态'
+fi
+
+# ── 10. 通知渠道与策略 ─────────────────────────────────────────
 head2 '通知渠道与策略'
 prov="$($PSQL -c "SELECT count(*) FROM notification_jobs;" 2>/dev/null || echo '?')"
 ok "notification_jobs 记录数：$prov"
@@ -200,7 +234,7 @@ else
 fi
 
 printf '\n════════════════════════════════════════════════\n'
-# ── 10. 密钥不得出现在前端构建产物（PRD FR-01 验收项）──────────
+# ── 11. 密钥不得出现在前端构建产物（PRD FR-01 验收项）──────────
 head2 '前端构建产物不含密钥'
 DIST=/opt/lifeos/dist/web
 if [ -d "$DIST" ]; then
