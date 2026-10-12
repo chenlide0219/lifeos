@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { tasks } from '../db/schema';
 import {
+  getSubjectRule,
   listSubjectJobs,
   purgeSubjectNotifications,
   rebuildTaskNotifications,
@@ -47,11 +48,13 @@ taskRoutes.get('/', requireAuth, async (c) =>
 
     // 「今天」= 今天到期 + 已逾期但仍未完成；「计划中」= 未来到期；
     // 「收件箱」= 没有截止日期的待办；「已完成」= done
+    // 无日期的待办只属于收件箱——列表条件必须与下方 counts 的口径一致
     const conditions = {
       inbox: and(eq(tasks.status, 'todo'), isNull(tasks.dueDate)),
       today: and(
         eq(tasks.status, 'todo'),
-        or(isNull(tasks.dueDate), lte(tasks.dueDate, today)),
+        isNotNull(tasks.dueDate),
+        lte(tasks.dueDate, today),
       ),
       upcoming: and(eq(tasks.status, 'todo'), sql`${tasks.dueDate} > ${today}`),
       done: eq(tasks.status, 'done'),
@@ -95,7 +98,9 @@ taskRoutes.get('/:id', requireAuth, async (c) =>
     const [row] = await db.select(SELECT_FIELDS).from(tasks).where(eq(tasks.id, id)).limit(1);
     if (!row) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
     const reminders = await listSubjectJobs('task', id);
-    return c.json({ task: row, reminders });
+    // 编辑回显：返回当前提醒规则，避免编辑时静默覆盖提醒设置
+    const rule = await getSubjectRule('task', id);
+    return c.json({ task: row, reminders, rule });
   }),
 );
 

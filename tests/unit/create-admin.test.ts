@@ -21,12 +21,17 @@ const { db, pool } = await import('../../src/server/db/client');
 const STRONG = 'Test-Password-123!@#';
 
 function runCli(args: string[]): { status: number; output: string } {
-  const result = spawnSync('npx', ['tsx', 'src/scripts/create-admin.ts', ...args], {
-    cwd: process.cwd(),
-    env: { ...process.env, DATABASE_URL: TEST_URL },
-    encoding: 'utf8',
-    timeout: 60_000,
-  });
+  // 用 node 直接跑 tsx 加载器：spawnSync('npx') 在 Windows 上找不到 .cmd 垫片
+  const result = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', 'src/scripts/create-admin.ts', ...args],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, DATABASE_URL: TEST_URL },
+      encoding: 'utf8',
+      timeout: 60_000,
+    },
+  );
   return {
     status: result.status ?? -1,
     output: `${result.stdout ?? ''}${result.stderr ?? ''}`,

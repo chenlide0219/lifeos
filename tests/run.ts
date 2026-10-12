@@ -40,15 +40,19 @@ function main(): void {
 
   let failed = 0;
 
-  // 1) 迁移测试库
-  failed += run('迁移测试库', 'npx', ['tsx', 'src/scripts/migrate.ts']) === 0 ? 0 : 1;
+  // 1) 迁移测试库（用 node 直接加载 tsx：spawnSync('npx') 在 Windows 上找不到 .cmd 垫片）
+  failed +=
+    run('迁移测试库', process.execPath, ['--import', 'tsx', 'src/scripts/migrate.ts']) === 0 ? 0 : 1;
   if (failed > 0) {
     console.error('\n测试库迁移失败，终止后续测试。');
     process.exit(1);
   }
 
   // 2) TypeScript 类型检查（不放宽断言的前提）
-  failed += run('类型检查 tsc --noEmit', 'npx', ['tsc', '--noEmit']) === 0 ? 0 : 1;
+  failed +=
+    run('类型检查 tsc --noEmit', process.execPath, ['node_modules/typescript/bin/tsc', '--noEmit']) === 0
+      ? 0
+      : 1;
 
   // 3) 单元 / 集成回归
   const unitDir = path.join(ROOT, 'tests', 'unit');

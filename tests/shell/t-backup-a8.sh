@@ -95,6 +95,14 @@ set -e
 [ "$code" -eq 0 ] || bad "轮转用例执行失败（$code）：$out"
 kept="$(find "$ROOT3/daily" -name 'lifeos-*.sql.gz.gpg' -type f | wc -l)"
 [ "$kept" -eq 7 ] && ok "轮转后保留 7 份（DAILY_KEEP）" || bad "轮转后应为 7 份，实际 $kept"
+
+echo '→ 用例 3b：同一天重跑备份应生成不同文件，不覆盖上一份'
+ROOT_SAME="$(new_root same-day)"; ENV_SAME="$WORK/env-same-day"
+env_file "$ENV_SAME" "$FPR" ""
+BACKUP_ROOT="$ROOT_SAME" ENV_FILE="$ENV_SAME" bash "$SCRIPT" > /dev/null
+BACKUP_ROOT="$ROOT_SAME" ENV_FILE="$ENV_SAME" bash "$SCRIPT" > /dev/null
+same_count="$(find "$ROOT_SAME/daily" -maxdepth 1 -type f -name 'lifeos-*.sql.gz.gpg' | wc -l)"
+[ "$same_count" -eq 2 ] && ok '同日两次备份均保留，文件名互不冲突' || bad "同日备份发生覆盖：仅 $same_count 份"
 newest="$(find "$ROOT3/daily" -name 'lifeos-*.sql.gz.gpg' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
 if gpg --batch --quiet --decrypt "$newest" 2>/dev/null | gzip -t 2>/dev/null; then
   ok "最新一份是本次新生成的可用备份"

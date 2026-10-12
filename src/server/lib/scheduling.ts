@@ -472,6 +472,25 @@ export async function purgeSubjectNotifications(
     );
 }
 
+/** 编辑回显：某事项当前生效的微信提醒规则（无规则时为 null） */
+export async function getSubjectRule(subjectType: SubjectType, subjectId: string) {
+  const [row] = await db
+    .select({
+      enabled: notificationRules.enabled,
+      offsetsMinutes: notificationRules.offsetsMinutes,
+    })
+    .from(notificationRules)
+    .where(
+      and(
+        eq(notificationRules.subjectType, subjectType),
+        eq(notificationRules.subjectId, subjectId),
+        eq(notificationRules.channel, 'wechat'),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
 /** 供界面展示：某事项的全部提醒 */
 export async function listSubjectJobs(subjectType: SubjectType, subjectId: string) {
   return db

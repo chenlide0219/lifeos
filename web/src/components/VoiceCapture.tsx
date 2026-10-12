@@ -3,25 +3,28 @@ import { ApiError, api } from '../api';
 import type { AiDraft } from '@shared/types';
 import { useRecorder } from '../hooks/useRecorder';
 import { IconMic } from './Icons';
+import { OffsetChips } from './ReminderOffsets';
+import { TimeInput } from './TimeInput';
 import { Alert, Spinner } from './ui';
 
 type Stage = 'capture' | 'transcript' | 'draft';
 
-const OFFSET_LABEL: Record<number, string> = {
-  1440: '提前 1 天',
-  120: '提前 2 小时',
-  60: '提前 1 小时',
-  30: '提前 30 分钟',
-  10: '提前 10 分钟',
-  5: '提前 5 分钟',
-};
+/** 与手动新增一致：类型切换处给出简短定义 */
+const KIND_HINT = '事件＝按时间发生的安排；待办＝需要完成的行动（待办设了具体时刻也仍是待办）';
 
-function toLocalInput(iso: string | null): string {
-  if (!iso) return '';
+function pad(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** ISO → 设备本地 "YYYY-MM-DD" 与 "HH:mm" */
+function splitLocal(iso: string | null): { date: string; time: string } {
+  if (!iso) return { date: '', time: '' };
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (Number.isNaN(d.getTime())) return { date: '', time: '' };
+  return {
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  };
 }
 
 /**
@@ -45,7 +48,10 @@ export function VoiceCapture({
   const [stage, setStage] = useState<Stage>('capture');
   const [transcript, setTranscript] = useState('');
   const [draft, setDraft] = useState<AiDraft | null>(null);
-  const [draftStart, setDraftStart] = useState('');
+  const [draftStartDate, setDraftStartDate] = useState('');
+  const [draftStartTime, setDraftStartTime] = useState('');
+  const [draftStartTimeInvalid, setDraftStartTimeInvalid] = useState(false);
+  const [draftDueTimeInvalid, setDraftDueTimeInvalid] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -102,7 +108,11 @@ export function VoiceCapture({
     try {
       const res = await api.voice.parse(transcript.trim());
       setDraft(res.draft);
-      setDraftStart(toLocalInput(res.draft.start_at));
+      const start = splitLocal(res.draft.start_at);
+      setDraftStartDate(start.date);
+      setDraftStartTime(start.time);
+      setDraftStartTimeInvalid(false);
+      setDraftDueTimeInvalid(false);
       setStage('draft');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '解析失败');
@@ -120,9 +130,13 @@ export function VoiceCapture({
       setError('标题不能为空');
       return;
     }
+    if ((isEvent && draftStartTimeInvalid) || (!isEvent && draftDueTimeInvalid)) {
+      setError('请把时间的小时和分钟填写完整，并确认数值有效');
+      return;
+    }
     // 含糊时间不擅自补全：必须由用户给出具体时间
-    if (isEvent && !draftStart) {
-      setError('请补充开始时间后再创建');
+    if (isEvent && (!draftStartDate || !draftStartTime)) {
+      setError('请补充开始时间的日期和时刻后再创建');
       return;
     }
     if (!isEvent && draft.reminder_enabled && draft.reminder_offsets.length > 0 && !draft.due_time) {
@@ -132,15 +146,22 @@ export function VoiceCapture({
 
     setBusy(true);
     try {
+      // 关闭提醒时不下发提前量：界面上关闭就是关闭，不生成任何通知任务
+      const reminderOffsets = draft.reminder_enabled ? draft.reminder_offsets : [];
       if (isEvent) {
+        const startInstant = new Date(`${draftStartDate}T${draftStartTime}`);
+        if (Number.isNaN(startInstant.getTime())) {
+          setError('开始时间不完整，请检查日期和时刻');
+          return;
+        }
         await api.events.create({
           title: draft.title,
-          startAt: new Date(draftStart).toISOString(),
+          startAt: startInstant.toISOString(),
           endAt: draft.end_at ? new Date(draft.end_at).toISOString() : null,
           location: draft.location,
           note: draft.note,
           reminderEnabled: draft.reminder_enabled,
-          reminderOffsets: draft.reminder_offsets,
+          reminderOffsets,
           source: 'voice',
         });
       } else {
@@ -150,7 +171,7 @@ export function VoiceCapture({
           dueTime: draft.due_time,
           note: draft.note,
           reminderEnabled: draft.reminder_enabled,
-          reminderOffsets: draft.reminder_offsets,
+          reminderOffsets,
           source: 'voice',
         });
       }
@@ -319,21 +340,35 @@ export function VoiceCapture({
                   </button>
                 ))}
               </div>
+              <p className="mt-1.5 px-1 text-xs text-muted">{KIND_HINT}</p>
             </div>
 
             {draft.kind === 'event' ? (
-              <div>
-                <label className="label" htmlFor="vd-start">
-                  开始时间
-                </label>
-                <input
-                  id="vd-start"
-                  type="datetime-local"
-                  className="input"
-                  value={draftStart}
-                  onChange={(e) => setDraftStart(e.target.value)}
-                />
-                {draft.start_at && !draftStart ? null : null}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="label" htmlFor="vd-start-date">
+                    开始日期
+                  </label>
+                  <input
+                    id="vd-start-date"
+                    type="date"
+                    className="input"
+                    value={draftStartDate}
+                    onChange={(e) => setDraftStartDate(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="vd-start-time">
+                    开始时间（24 小时制）
+                  </label>
+                  <TimeInput
+                    id="vd-start-time"
+                    ariaLabel="开始时间"
+                    value={draftStartTime}
+                    onChange={setDraftStartTime}
+                    onInvalidChange={setDraftStartTimeInvalid}
+                  />
+                </div>
               </div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -351,14 +386,14 @@ export function VoiceCapture({
                 </div>
                 <div>
                   <label className="label" htmlFor="vd-time">
-                    具体时刻
+                    具体时刻（24 小时制）
                   </label>
-                  <input
+                  <TimeInput
                     id="vd-time"
-                    type="time"
-                    className="input"
+                    ariaLabel="具体时刻"
                     value={draft.due_time ?? ''}
-                    onChange={(e) => setDraft({ ...draft, due_time: e.target.value || null })}
+                    onChange={(v) => setDraft({ ...draft, due_time: v || null })}
+                    onInvalidChange={setDraftDueTimeInvalid}
                   />
                 </div>
               </div>
@@ -393,14 +428,25 @@ export function VoiceCapture({
                 />
               </label>
               {draft.reminder_enabled ? (
-                <p className="mt-2 text-xs text-muted">
-                  提前量：
-                  {draft.reminder_offsets.length > 0
-                    ? draft.reminder_offsets.map((o) => OFFSET_LABEL[o] ?? `提前 ${o} 分钟`).join('、')
-                    : '未选择'}
-                </p>
+                <div className="mt-3 space-y-2">
+                  <p className="text-xs text-muted">提前量（可多选，识别结果已预选）</p>
+                  <OffsetChips
+                    selected={draft.reminder_offsets}
+                    onToggle={(minutes) =>
+                      setDraft({
+                        ...draft,
+                        reminder_offsets: draft.reminder_offsets.includes(minutes)
+                          ? draft.reminder_offsets.filter((m) => m !== minutes)
+                          : [...draft.reminder_offsets, minutes].sort((a, b) => b - a),
+                      })
+                    }
+                  />
+                  {draft.reminder_offsets.length === 0 ? (
+                    <p className="text-xs text-subscription">未选择提前量，创建后不会产生任何提醒</p>
+                  ) : null}
+                </div>
               ) : (
-                <p className="mt-2 text-xs text-muted">原文未明确要求提醒，默认关闭</p>
+                <p className="mt-2 text-xs text-muted">原文未明确要求提醒，默认关闭；关闭后不会生成任何通知</p>
               )}
             </div>
 

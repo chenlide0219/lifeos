@@ -10,6 +10,7 @@ import {
 } from '../api';
 import { IconPlus, IconSubscription } from '../components/Icons';
 import { CsvImportDialog } from '../components/CsvImport';
+import { TimeInput } from '../components/TimeInput';
 import { Alert, Card, EmptyState, PageHeader, Spinner } from '../components/ui';
 
 const PERIOD_LABEL: Record<string, string> = {
@@ -42,6 +43,17 @@ function money(amount: string | null, currency: string): string {
   return `${amount} ${currency}`;
 }
 
+/** 逾期未处理 > 今天扣费 > 下次预计扣费；日期比较用服务端给出的上海时区"今天" */
+function billUrgency(plannedDate: string, todayStr: string): { label: string; className: string } {
+  if (plannedDate < todayStr) {
+    return { label: '逾期未处理', className: 'chip bg-red-500/10 font-medium text-red-600' };
+  }
+  if (plannedDate === todayStr) {
+    return { label: '今天扣费', className: 'chip bg-amber-500/10 font-medium text-amber-600' };
+  }
+  return { label: '下次预计扣费', className: 'text-xs text-muted' };
+}
+
 export function SubscriptionsPage() {
   const [list, setList] = useState<SubscriptionDto[]>([]);
   const [summary, setSummary] = useState<SubscriptionsSummary | null>(null);
@@ -52,6 +64,7 @@ export function SubscriptionsPage() {
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Partial<SubscriptionDto> | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reminderTimeInvalid, setReminderTimeInvalid] = useState(false);
   const [csvOpen, setCsvOpen] = useState(false);
 
   const load = useCallback(async () => {
@@ -61,7 +74,7 @@ export function SubscriptionsPage() {
       const [listRes, summaryRes, billsRes] = await Promise.all([
         api.subscriptions.list(),
         api.subscriptions.summary(),
-        api.subscriptions.bills('expected'),
+        api.subscriptions.bills('expected', true),
       ]);
       setList(listRes.subscriptions);
       setSummary(summaryRes);
@@ -77,6 +90,22 @@ export function SubscriptionsPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!editing) setReminderTimeInvalid(false);
+  }, [editing]);
+
+  // 后端已按订阅取最早一笔；这里按日期排序并再次去重，保护主列表语义。
+  // 若最早的是逾期账单，处理（确认/跳过）之后下一笔预计扣费才会露出来；
+  // 未来账单照常生成保存，只是不在这里堆叠展示。
+  const todayStr = summary?.today ?? today();
+  const seenSubs = new Set<string>();
+  const mainBills: ExpectedBillDto[] = [];
+  for (const b of [...bills].sort((a, b) => a.plannedDate.localeCompare(b.plannedDate))) {
+    if (seenSubs.has(b.subscriptionId)) continue;
+    seenSubs.add(b.subscriptionId);
+    mainBills.push(b);
+  }
+
   async function openDetail(id: string) {
     setError(null);
     try {
@@ -91,6 +120,16 @@ export function SubscriptionsPage() {
     setBusy(true);
     setError(null);
     try {
+      if (editing.reminderEnabled && reminderTimeInvalid) {
+        setError('请把发送时刻的小时和分钟填写完整，并确认数值有效');
+        return;
+      }
+      const reminderTime = (editing.reminderTime || '09:00').slice(0, 5);
+      // 开着提醒却没有发送时刻，排出来的提醒无处安放 —— 在这里明确拒绝
+      if ((editing.reminderEnabled ?? false) && !editing.reminderTime) {
+        setError('已开启微信提醒，请填写发送时刻');
+        return;
+      }
       const payload = {
         name: editing.name ?? '',
         price: editing.price ?? null,
@@ -107,7 +146,7 @@ export function SubscriptionsPage() {
         note: editing.note ?? null,
         reminderEnabled: editing.reminderEnabled ?? false,
         reminderDaysBefore: editing.reminderDaysBefore ?? 3,
-        reminderTime: (editing.reminderTime ?? '09:00').slice(0, 5),
+        reminderTime,
       };
       if (editing.id) await api.subscriptions.update(editing.id, payload);
       else await api.subscriptions.create(payload);
@@ -267,29 +306,38 @@ export function SubscriptionsPage() {
         </div>
       </div>
 
-      <Card title="待确认的预计账单" subtitle="预计账单不会自动变成支出，需要你确认">
+      <Card
+        title="待确认的预计账单"
+        subtitle="每个订阅只显示最近一笔待处理的账单；已跳过、已确认的留在明细里"
+      >
         {loading ? (
           <div className="flex items-center gap-2 py-6 text-sm text-muted"><Spinner /> 读取中…</div>
-        ) : bills.length === 0 ? (
+        ) : mainBills.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted">没有待确认的预计账单</p>
         ) : (
           <ul className="divide-y divide-line">
-            {bills.slice(0, 8).map((bill) => (
-              <li key={bill.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{bill.subscriptionName ?? '（订阅已删除）'}</p>
-                  <p className="text-xs text-muted">{bill.plannedDate} · {money(bill.amount, bill.currency)}</p>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  <button type="button" className="btn-ghost !px-2.5 !py-1 text-xs" disabled={busy} onClick={() => void skipBill(bill)}>
-                    跳过
-                  </button>
-                  <button type="button" className="btn-primary !px-2.5 !py-1 text-xs" disabled={busy} onClick={() => void confirmBill(bill)}>
-                    确认已付
-                  </button>
-                </div>
-              </li>
-            ))}
+            {mainBills.map((bill) => {
+              const urgency = billUrgency(bill.plannedDate, todayStr);
+              return (
+                <li key={bill.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{bill.subscriptionName ?? '（订阅已删除）'}</p>
+                    <p className="mt-0.5 flex items-center gap-2 text-xs text-muted">
+                      {bill.plannedDate} · {money(bill.amount, bill.currency)}
+                      <span className={urgency.className}>{urgency.label}</span>
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <button type="button" className="btn-ghost !px-2.5 !py-1 text-xs" disabled={busy} onClick={() => void skipBill(bill)}>
+                      跳过
+                    </button>
+                    <button type="button" className="btn-primary !px-2.5 !py-1 text-xs" disabled={busy} onClick={() => void confirmBill(bill)}>
+                      确认已付
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Card>
@@ -401,6 +449,7 @@ export function SubscriptionsPage() {
           onChange={setEditing}
           onCancel={() => setEditing(null)}
           onSave={saveSubscription}
+          onTimeValidityChange={setReminderTimeInvalid}
         />
       ) : null}
     </>
@@ -413,12 +462,14 @@ function SubscriptionDialog({
   onChange,
   onCancel,
   onSave,
+  onTimeValidityChange,
 }: {
   value: Partial<SubscriptionDto>;
   busy: boolean;
   onChange: (v: Partial<SubscriptionDto>) => void;
   onCancel: () => void;
   onSave: () => void;
+  onTimeValidityChange: (invalid: boolean) => void;
 }) {
   const period = value.billingPeriod ?? 'monthly';
   return (
@@ -516,13 +567,13 @@ function SubscriptionDialog({
                   <p className="mt-1 text-xs text-muted">0 表示当天提醒</p>
                 </div>
                 <div>
-                  <label className="label" htmlFor="sub-remind-time">发送时刻</label>
-                  <input
+                  <label className="label" htmlFor="sub-remind-time">发送时刻（24 小时制）</label>
+                  <TimeInput
                     id="sub-remind-time"
-                    type="time"
-                    className="input"
+                    ariaLabel="发送时刻"
                     value={(value.reminderTime ?? '09:00').slice(0, 5)}
-                    onChange={(e) => onChange({ ...value, reminderTime: e.target.value })}
+                    onChange={(v) => onChange({ ...value, reminderTime: v || '' })}
+                    onInvalidChange={onTimeValidityChange}
                   />
                 </div>
               </div>

@@ -3,6 +3,7 @@ import { and, asc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '../db/client';
 import { events } from '../db/schema';
 import {
+  getSubjectRule,
   listSubjectJobs,
   purgeSubjectNotifications,
   rebuildEventNotifications,
@@ -74,7 +75,10 @@ eventRoutes.get('/:id', requireAuth, async (c) =>
     const [row] = await db.select(SELECT_FIELDS).from(events).where(eq(events.id, id)).limit(1);
     if (!row) return c.json({ error: 'not_found', message: '事件不存在' }, 404);
     const reminders = await listSubjectJobs('event', id);
-    return c.json({ event: row, reminders });
+    // 提醒规则单独返回：编辑表单需要回显已保存的开关与提前量，
+    // 否则一次"只是改标题"的编辑会把提醒静默关闭
+    const rule = await getSubjectRule('event', id);
+    return c.json({ event: row, reminders, rule });
   }),
 );
 

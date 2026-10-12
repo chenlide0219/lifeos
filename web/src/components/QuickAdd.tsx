@@ -6,41 +6,44 @@ import {
   type ReminderResult,
   type TaskDto,
 } from '../api';
+import { OffsetChips } from './ReminderOffsets';
+import { TimeInput } from './TimeInput';
 import { Alert, Spinner } from './ui';
 
 export type QuickAddMode = 'event' | 'task';
 
-const PRESET_OFFSETS = [
-  { minutes: 60, label: '提前 1 小时' },
-  { minutes: 10, label: '提前 10 分钟' },
-];
-
-const CUSTOM_OFFSETS = [
-  { minutes: 1440, label: '1 天' },
-  { minutes: 120, label: '2 小时' },
-  { minutes: 30, label: '30 分钟' },
-  { minutes: 5, label: '5 分钟' },
-];
+/** 类型定义放在切换处，避免把"带时刻的待办"误当成事件 */
+const KIND_HINT = '事件＝按时间发生的安排；待办＝需要完成的行动（待办设了具体时刻也仍是待办）';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-/** <input type="datetime-local"> 需要浏览器本地时间的 YYYY-MM-DDTHH:mm */
-function toLocalInput(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function defaultStart(): string {
-  const d = new Date();
-  d.setMinutes(0, 0, 0);
-  d.setHours(d.getHours() + 1);
-  return toLocalInput(d);
+/** 绝对时刻 → 设备本地 "YYYY-MM-DD" 与 "HH:mm"（表单回显用） */
+function splitLocal(date: Date): { date: string; time: string } {
+  const local = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const [d, t] = local.split('T');
+  return { date: d!, time: t!.slice(0, 5) };
 }
 
 function defaultDate(): string {
   const d = new Date();
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function defaultTime(): string {
+  const d = new Date();
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return `${pad(d.getHours())}:00`;
+}
+
+/** 日期 + HH:mm → ISO 绝对时刻；任一缺失或非法返回 null */
+function buildInstant(date: string, time: string): string | null {
+  if (!date || !time) return null;
+  const d = new Date(`${date}T${time}`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
 }
 
 type Props = {
@@ -57,48 +60,101 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
   const editing = Boolean(event || task);
   const [mode, setMode] = useState<QuickAddMode>(initialMode);
   const [title, setTitle] = useState('');
-  const [startAt, setStartAt] = useState(defaultStart);
-  const [endAt, setEndAt] = useState('');
+  const [startDate, setStartDate] = useState(defaultDate);
+  const [startTime, setStartTime] = useState(defaultTime);
+  const [endDate, setEndDate] = useState('');
+  const [endTime, setEndTime] = useState('');
   const [location, setLocation] = useState('');
   const [dueDate, setDueDate] = useState(defaultDate);
   const [dueTime, setDueTime] = useState('');
   const [note, setNote] = useState('');
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [offsets, setOffsets] = useState<number[]>([]);
+  // 编辑模式下提醒设置来自详情接口；读取完成前提交不携带提醒字段，
+  // 服务端会保留原规则 —— 这样"读失败"也不会把已有提醒静默抹掉
+  const [reminderLoaded, setReminderLoaded] = useState(!editing);
+  const [startTimeInvalid, setStartTimeInvalid] = useState(false);
+  const [endTimeInvalid, setEndTimeInvalid] = useState(false);
+  const [dueTimeInvalid, setDueTimeInvalid] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // 打开时同步初值（编辑模式用记录填充）
+  // 打开时同步初值（编辑模式用记录填充，并异步读取已保存的提醒规则）
   useEffect(() => {
     if (!open) return;
     setError(null);
     setNotice(null);
+    setReminderLoaded(!editing);
+    setReminderEnabled(false);
+    setOffsets([]);
+    setStartTimeInvalid(false);
+    setEndTimeInvalid(false);
+    setDueTimeInvalid(false);
+    let cancelled = false;
+
     if (event) {
       setMode('event');
       setTitle(event.title);
-      setStartAt(toLocalInput(new Date(event.startAt)));
-      setEndAt(event.endAt ? toLocalInput(new Date(event.endAt)) : '');
+      const start = splitLocal(new Date(event.startAt));
+      setStartDate(start.date);
+      setStartTime(start.time);
+      if (event.endAt) {
+        const end = splitLocal(new Date(event.endAt));
+        setEndDate(end.date);
+        setEndTime(end.time);
+      } else {
+        setEndDate('');
+        setEndTime('');
+      }
       setLocation(event.location ?? '');
       setNote(event.note ?? '');
+      api.events
+        .get(event.id)
+        .then((d) => {
+          if (cancelled) return;
+          setReminderEnabled(d.rule?.enabled ?? false);
+          setOffsets(d.rule?.offsetsMinutes ?? []);
+          setReminderLoaded(true);
+        })
+        .catch(() => {
+          if (!cancelled) setReminderLoaded(false);
+        });
     } else if (task) {
       setMode('task');
       setTitle(task.title);
       setDueDate(task.dueDate ?? defaultDate());
       setDueTime(task.dueTime ? task.dueTime.slice(0, 5) : '');
       setNote(task.note ?? '');
+      api.tasks
+        .get(task.id)
+        .then((d) => {
+          if (cancelled) return;
+          setReminderEnabled(d.rule?.enabled ?? false);
+          setOffsets(d.rule?.offsetsMinutes ?? []);
+          setReminderLoaded(true);
+        })
+        .catch(() => {
+          if (!cancelled) setReminderLoaded(false);
+        });
     } else {
       setMode(initialMode);
       setTitle('');
-      setStartAt(defaultStart());
-      setEndAt('');
+      setStartDate(defaultDate());
+      setStartTime(defaultTime());
+      setEndDate('');
+      setEndTime('');
       setLocation('');
       setDueDate(defaultDate());
       setDueTime('');
       setNote('');
       setReminderEnabled(false);
       setOffsets([]);
+      setReminderLoaded(true);
     }
+    return () => {
+      cancelled = true;
+    };
   }, [open, event, task, initialMode]);
 
   if (!open) return null;
@@ -114,6 +170,11 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
     setError(null);
     setNotice(null);
 
+    if ((mode === 'event' && (startTimeInvalid || endTimeInvalid)) || (mode === 'task' && dueTimeInvalid)) {
+      setError('请把时间的小时和分钟填写完整，并确认数值有效');
+      return;
+    }
+
     // 待办要精确提醒必须有具体时刻（PRD FR-02）
     if (mode === 'task' && reminderEnabled && offsets.length > 0 && !dueTime) {
       setError('设置精确提醒需要补充具体时刻（全天待办无法精确提醒）');
@@ -122,19 +183,32 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
 
     setSubmitting(true);
     try {
-      const payload = {
-        title,
-        reminderEnabled,
-        reminderOffsets: reminderEnabled ? offsets : [],
-        source: 'manual' as const,
-      };
+      // 编辑模式下若提醒规则尚未读到，就不携带提醒字段，服务端保留原规则
+      const reminderFields = reminderLoaded
+        ? { reminderEnabled, reminderOffsets: reminderEnabled ? offsets : [] }
+        : {};
 
       let reminder: ReminderResult;
       if (mode === 'event') {
+        const startIso = buildInstant(startDate, startTime);
+        if (!startIso) {
+          setError('请补充开始时间的日期和时刻（24 小时制，如 13:27）');
+          return;
+        }
+        let endIso: string | null = null;
+        if (endDate || endTime) {
+          endIso = buildInstant(endDate, endTime);
+          if (!endIso) {
+            setError('结束时间需要同时有日期和时刻');
+            return;
+          }
+        }
         const body = {
-          ...payload,
-          startAt: new Date(startAt).toISOString(),
-          endAt: endAt ? new Date(endAt).toISOString() : null,
+          title,
+          source: 'manual' as const,
+          ...reminderFields,
+          startAt: startIso,
+          endAt: endIso,
           location: location || null,
           note: note || null,
         };
@@ -142,7 +216,9 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
         reminder = res.reminder;
       } else {
         const body = {
-          ...payload,
+          title,
+          source: 'manual' as const,
+          ...reminderFields,
           dueDate: dueDate || null,
           dueTime: dueTime || null,
           note: note || null,
@@ -178,19 +254,22 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
         </div>
 
         {!editing ? (
-          <div className="mb-4 flex gap-1 rounded-xl border border-line p-1">
-            {(['event', 'task'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                  mode === m ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'
-                }`}
-              >
-                {m === 'event' ? '事件' : '待办'}
-              </button>
-            ))}
+          <div className="mb-4">
+            <div className="flex gap-1 rounded-xl border border-line p-1">
+              {(['event', 'task'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    mode === m ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'
+                  }`}
+                >
+                  {m === 'event' ? '事件' : '待办'}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 px-1 text-xs text-muted">{KIND_HINT}</p>
           </div>
         ) : null}
 
@@ -214,28 +293,54 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
             <>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
-                  <label className="label" htmlFor="qa-start">
-                    开始时间
+                  <label className="label" htmlFor="qa-start-date">
+                    开始日期
                   </label>
                   <input
-                    id="qa-start"
-                    type="datetime-local"
+                    id="qa-start-date"
+                    type="date"
                     className="input"
-                    value={startAt}
-                    onChange={(e) => setStartAt(e.target.value)}
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
                     required
                   />
                 </div>
                 <div>
-                  <label className="label" htmlFor="qa-end">
-                    结束时间（可选）
+                  <label className="label" htmlFor="qa-start-time">
+                    开始时间（24 小时制）
+                  </label>
+                  <TimeInput
+                    id="qa-start-time"
+                    ariaLabel="开始时间"
+                    value={startTime}
+                    onChange={setStartTime}
+                    onInvalidChange={setStartTimeInvalid}
+                  />
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="label" htmlFor="qa-end-date">
+                    结束日期（可选）
                   </label>
                   <input
-                    id="qa-end"
-                    type="datetime-local"
+                    id="qa-end-date"
+                    type="date"
                     className="input"
-                    value={endAt}
-                    onChange={(e) => setEndAt(e.target.value)}
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="qa-end-time">
+                    结束时间（可选）
+                  </label>
+                  <TimeInput
+                    id="qa-end-time"
+                    ariaLabel="结束时间"
+                    value={endTime}
+                    onChange={setEndTime}
+                    onInvalidChange={setEndTimeInvalid}
                   />
                 </div>
               </div>
@@ -268,15 +373,9 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
               </div>
               <div>
                 <label className="label" htmlFor="qa-time">
-                  具体时刻（可选）
+                  具体时刻（可选，24 小时制）
                 </label>
-                <input
-                  id="qa-time"
-                  type="time"
-                  className="input"
-                  value={dueTime}
-                  onChange={(e) => setDueTime(e.target.value)}
-                />
+                <TimeInput id="qa-time" ariaLabel="具体时刻" value={dueTime} onChange={setDueTime} onInvalidChange={setDueTimeInvalid} />
                 <p className="mt-1 text-xs text-muted">留空为全天待办，全天待办不能精确到分钟提醒</p>
               </div>
             </div>
@@ -301,6 +400,7 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
                 type="checkbox"
                 className="h-4 w-4 accent-[#6366f1]"
                 checked={reminderEnabled}
+                disabled={editing && !reminderLoaded}
                 onChange={(e) => {
                   setReminderEnabled(e.target.checked);
                   if (e.target.checked && offsets.length === 0) setOffsets([60, 10]);
@@ -308,41 +408,12 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
               />
             </label>
 
-            {reminderEnabled ? (
+            {editing && !reminderLoaded ? (
+              <p className="mt-2 text-xs text-muted">提醒设置读取中…；保存不会改动已有提醒</p>
+            ) : reminderEnabled ? (
               <div className="mt-3 space-y-2">
-                <p className="text-xs text-muted">提前量</p>
-                <div className="flex flex-wrap gap-2">
-                  {PRESET_OFFSETS.map(({ minutes, label }) => (
-                    <button
-                      key={minutes}
-                      type="button"
-                      onClick={() => toggleOffset(minutes)}
-                      aria-pressed={offsets.includes(minutes)}
-                      className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                        offsets.includes(minutes)
-                          ? 'border-brand/30 bg-brand/10 text-brand'
-                          : 'border-line text-muted hover:text-ink'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                  {CUSTOM_OFFSETS.map(({ minutes, label }) => (
-                    <button
-                      key={minutes}
-                      type="button"
-                      onClick={() => toggleOffset(minutes)}
-                      aria-pressed={offsets.includes(minutes)}
-                      className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                        offsets.includes(minutes)
-                          ? 'border-brand/30 bg-brand/10 text-brand'
-                          : 'border-line text-muted hover:text-ink'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                <p className="text-xs text-muted">提前量（可多选）</p>
+                <OffsetChips selected={offsets} onToggle={toggleOffset} />
                 {offsets.length === 0 ? (
                   <p className="text-xs text-subscription">未选择提前量，保存后不会产生任何提醒</p>
                 ) : null}

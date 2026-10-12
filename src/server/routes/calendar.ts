@@ -218,27 +218,18 @@ calendarRoutes.get('/', requireAuth, async (c) =>
   }),
 );
 
-/** 仪表盘：今日待办 + 未来 7 天概要 */
+/**
+ * 仪表盘：今日待办（含逾期未完成，不含无日期待办——它们留在待办页收件箱）。
+ *
+ * 未来一周的安排直接看日历的周视图，此处不再重复返回事件；
+ * 订阅的「即将扣费」由 /api/subscriptions/summary 提供。
+ */
 calendarRoutes.get('/overview', requireAuth, async (c) =>
   guard(c, async () => {
     const now = new Date();
     const today = instantToDateString(now);
-    const horizon = new Date(now.getTime() + 7 * 86_400_000);
-    const horizonDate = instantToDateString(horizon);
 
-    const upcomingEvents = await db
-      .select({
-        id: events.id,
-        title: events.title,
-        startAt: events.startAt,
-        location: events.location,
-      })
-      .from(events)
-      .where(and(eq(events.status, 'active'), gte(events.startAt, now), lte(events.startAt, horizon)))
-      .orderBy(events.startAt)
-      .limit(20);
-
-    // 今日待办 = 今天到期 + 已逾期未完成
+    // 今日待办 = 今天到期 + 已逾期未完成；无截止日期的待办不属于任何一天，不在这里
     const dueToday = await db
       .select({
         id: tasks.id,
@@ -253,15 +244,6 @@ calendarRoutes.get('/overview', requireAuth, async (c) =>
 
     return c.json({
       today,
-      horizonDate,
-      events: upcomingEvents.map((e) => ({
-        id: e.id,
-        title: e.title,
-        startAt: e.startAt.toISOString(),
-        date: instantToDateString(e.startAt),
-        time: instantToTimeString(e.startAt),
-        location: e.location,
-      })),
       tasksDueToday: dueToday,
       tasksDueTodayCount: dueToday.length,
     });

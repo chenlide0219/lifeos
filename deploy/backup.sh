@@ -48,7 +48,9 @@ command -v gpg >/dev/null || { err "找不到 gpg"; exit 2; }
 # ── 1. 准备目录（最小权限）─────────────────────────────────────
 install -d -m 700 "$BACKUP_ROOT" "$BACKUP_ROOT/daily" "$BACKUP_ROOT/weekly"
 
-STAMP="$(date +%Y-%m-%d)"
+# 同一天手动重跑也必须产生新文件：固定日期名配合 rsync --ignore-existing
+# 会保留远端旧包并让大小校验失败，还会覆盖本地当天上一次的备份。
+STAMP="$(date +%Y-%m-%dT%H%M%S)-$$"
 BASENAME="$PREFIX-$STAMP.sql.gz.gpg"
 PLAIN="$BACKUP_ROOT/.$BASENAME.plain.$$"
 DAILY_TARGET="$BACKUP_ROOT/daily/$BASENAME"
@@ -107,16 +109,16 @@ if [ -n "${BACKUP_OFFSITE:-}" ]; then
   [ -n "${BACKUP_OFFSITE_PORT:-}" ] && SSH_PORT_ARG=(-p "$BACKUP_OFFSITE_PORT")
 
   # -e 里带上密钥与端口，使 rsync 的远端命令同样使用该密钥
-  RSYNC_SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new ${SSH_PORT_ARG[*]:-}"
+  RSYNC_SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 ${SSH_PORT_ARG[*]:-}"
 
   log "异机上传到 $OFFSITE_HOST:$OFFSITE_DIR …"
   # --ignore-existing：已存在的同名文件不覆盖，避免半截文件覆盖完好副本
-  rsync -a --ignore-existing \
+  rsync -a --ignore-existing --timeout=30 \
         -e "$RSYNC_SSH" \
         "$DAILY_TARGET" "$OFFSITE_HOST:$OFFSITE_DIR/daily/"
 
   # 校验远端确实存在且大小一致，否则视为上传失败
-  remote_size=$(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_PORT_ARG[@]}" \
+  remote_size=$(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "${SSH_PORT_ARG[@]}" \
       "$OFFSITE_HOST" "stat -c %s '$OFFSITE_DIR/daily/$BASENAME'" 2>/dev/null || echo missing)
   if [ "$remote_size" = "missing" ]; then
     err "远端未找到上传产物 $BASENAME，上传判定失败"
@@ -127,7 +129,7 @@ if [ -n "${BACKUP_OFFSITE:-}" ]; then
   log "异机上传已校验（大小一致：$local_size 字节）"
 
   # 远端轮转：只匹配本项目备份文件名，绝不触碰目标目录中的其他文件
-  ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_PORT_ARG[@]}" "$OFFSITE_HOST" \
+  ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "${SSH_PORT_ARG[@]}" "$OFFSITE_HOST" \
     "install -d -m 700 '$OFFSITE_DIR/daily' '$OFFSITE_DIR/weekly' 2>/dev/null;
      find '$OFFSITE_DIR/daily' -maxdepth 1 -type f -name '$PREFIX-*.sql.gz.gpg' -printf '%T@ %p\n' \
        | sort -rn | tail -n +$((DAILY_KEEP + 1)) | cut -d' ' -f2- | xargs -r rm -f;

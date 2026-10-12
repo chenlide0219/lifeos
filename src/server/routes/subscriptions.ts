@@ -244,7 +244,9 @@ subscriptionRoutes.get('/summary', requireAuth, async (c) =>
         net: (Number(p.gross) - Number(p.refunds)).toFixed(2),
         count: p.count,
       })),
-      upcoming: upcoming.slice(0, 10),
+      // 首页自行筛选 0–7 天；这里不能先截取前 10 项，否则前面的
+      // 已关闭自动续费项目可能挤掉后面真正即将扣费的订阅。
+      upcoming,
       subscriptions: rows.length,
       expectedMonthly: expectedMonthly.toFixed(2),
       today,
@@ -400,9 +402,9 @@ subscriptionRoutes.get('/bills/list', requireAuth, async (c) =>
   guard(c, async () => {
     const statusParam = (c.req.query('status') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const where = statusParam.length > 0 ? inArray(expectedBills.status, statusParam) : undefined;
+    const nextPerSubscription = c.req.query('nextPerSubscription') === '1';
 
-    const rows = await db
-      .select({
+    const fields = {
         id: expectedBills.id,
         subscriptionId: expectedBills.subscriptionId,
         subscriptionName: subscriptions.name,
@@ -412,12 +414,24 @@ subscriptionRoutes.get('/bills/list', requireAuth, async (c) =>
         status: expectedBills.status,
         generatedBy: expectedBills.generatedBy,
         note: expectedBills.note,
-      })
-      .from(expectedBills)
-      .leftJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
-      .where(where)
-      .orderBy(asc(expectedBills.plannedDate))
-      .limit(300);
+    };
+
+    // DISTINCT ON 在数据库中按订阅挑最早的待处理账单，避免先截取 300 条
+    // 再在前端去重时，订阅较多就遗漏排在后面的订阅。
+    const rows = nextPerSubscription
+      ? await db
+          .selectDistinctOn([expectedBills.subscriptionId], fields)
+          .from(expectedBills)
+          .leftJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
+          .where(where)
+          .orderBy(asc(expectedBills.subscriptionId), asc(expectedBills.plannedDate))
+      : await db
+          .select(fields)
+          .from(expectedBills)
+          .leftJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
+          .where(where)
+          .orderBy(asc(expectedBills.plannedDate))
+          .limit(300);
 
     return c.json({ bills: rows });
   }),

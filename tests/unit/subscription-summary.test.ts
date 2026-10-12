@@ -102,6 +102,16 @@ describe('即将扣费列表的语义', () => {
     assert.equal(summary.upcoming[0]!.autoRenew, false, '界面必须能区分"不会真的扣费"');
   });
 
+  it('汇总不截断前十项，避免隐藏后续真正待扣费的订阅', async () => {
+    for (let i = 0; i < 10; i++) {
+      await createSub({ ...base(), name: `不再续费 ${i}`, autoRenew: false, status: 'auto_renew_off' });
+    }
+    await createSub({ ...base(), name: '仍会扣费' });
+    const summary = await json<Summary>(await request('/api/subscriptions/summary'));
+    assert.equal(summary.upcoming.length, 11);
+    assert.ok(summary.upcoming.some((s) => s.name === '仍会扣费' && s.autoRenew));
+  });
+
   it('已结束的订阅不出现在待扣费列表（它不会再扣费）', async () => {
     await createSub({ ...base(), name: '已结束的服务', status: 'ended' });
     const summary = await json<Summary>(await request('/api/subscriptions/summary'));

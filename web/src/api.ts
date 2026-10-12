@@ -179,11 +179,15 @@ export type CalendarResponse = {
 
 export type OverviewResponse = {
   today: string;
-  horizonDate: string;
-  events: { id: string; title: string; startAt: string; date: string; time: string; location: string | null }[];
   tasksDueToday: { id: string; title: string; dueDate: string | null; dueTime: string | null }[];
   tasksDueTodayCount: number;
 };
+
+/** 事项详情里附带的当前微信提醒规则（从未设置过时为 null） */
+export type SubjectRule = {
+  enabled: boolean;
+  offsetsMinutes: number[] | null;
+} | null;
 
 export type TaskView = 'inbox' | 'today' | 'upcoming' | 'done';
 
@@ -377,6 +381,8 @@ export const api = {
       const suffix = query.toString();
       return request<{ events: EventDto[] }>(`/events${suffix ? `?${suffix}` : ''}`);
     },
+    get: (id: string) =>
+      request<{ event: EventDto; reminders: unknown[]; rule: SubjectRule }>(`/events/${id}`),
     create: (input: EventInput) =>
       request<{ event: EventDto; reminder: ReminderResult }>('/events', { method: 'POST', body: input }),
     update: (id: string, input: Partial<EventInput>) =>
@@ -393,6 +399,8 @@ export const api = {
     list: (view: TaskView) => request<{ tasks: TaskDto[]; view: TaskView; today: string }>(`/tasks?view=${view}`),
     counts: () =>
       request<{ counts: Record<TaskView, number>; today: string }>('/tasks/counts'),
+    get: (id: string) =>
+      request<{ task: TaskDto; reminders: unknown[]; rule: SubjectRule }>(`/tasks/${id}`),
     create: (input: TaskInput) =>
       request<{ task: TaskDto; reminder: ReminderResult }>('/tasks', { method: 'POST', body: input }),
     update: (id: string, input: Partial<TaskInput>) =>
@@ -448,9 +456,16 @@ export const api = {
       request<{ subscription: SubscriptionDto }>(`/subscriptions/${id}`, { method: 'PATCH', body: input }),
     remove: (id: string) => request<{ ok: boolean }>(`/subscriptions/${id}`, { method: 'DELETE' }),
 
-    bills: (status?: string) =>
+    bills: (status?: string, nextPerSubscription = false) =>
       request<{ bills: ExpectedBillDto[] }>(
-        `/subscriptions/bills/list${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+        `/subscriptions/bills/list${
+          status || nextPerSubscription
+            ? `?${new URLSearchParams({
+                ...(status ? { status } : {}),
+                ...(nextPerSubscription ? { nextPerSubscription: '1' } : {}),
+              })}`
+            : ''
+        }`,
       ),
 
     /** 唯一能把「预计」变成「实付」的入口 */

@@ -78,6 +78,27 @@ async function createSub(overrides: Record<string, unknown> = {}) {
 }
 
 describe('档案创建与预计账单生成', () => {
+  it('主列表按订阅各取最早待处理账单，不受普通列表 300 条上限影响', async () => {
+    for (let i = 0; i < 26; i++) {
+      const { res } = await createSub({ name: `订阅 ${i}`, serviceEndDate: null });
+      assert.equal(res.status, 201);
+    }
+
+    const next = await json<{ bills: { id: string; subscriptionId: string; plannedDate: string }[] }>(
+      await request('/api/subscriptions/bills/list?status=expected&nextPerSubscription=1'),
+    );
+    assert.equal(next.bills.length, 26, '每个订阅都必须出现一次，即使全部未来账单超过 300 条');
+    assert.equal(new Set(next.bills.map((b) => b.subscriptionId)).size, 26);
+
+    const first = next.bills[0]!;
+    assert.equal((await request(`/api/subscriptions/bills/${first.id}/skip`, { method: 'POST' })).status, 200);
+    const after = await json<{ bills: { subscriptionId: string; plannedDate: string }[] }>(
+      await request('/api/subscriptions/bills/list?status=expected&nextPerSubscription=1'),
+    );
+    assert.equal(after.bills.length, 26);
+    assert.ok(after.bills.find((b) => b.subscriptionId === first.subscriptionId)!.plannedDate > first.plannedDate);
+  });
+
   it('创建订阅后按规则生成预计账单，但**不产生任何付款记录**', async () => {
     const { res, body } = await createSub();
     assert.equal(res.status, 201);

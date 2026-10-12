@@ -214,6 +214,80 @@ describe('事件 CRUD 与提醒联动', () => {
     );
     assert.equal((jobs as unknown as { rows: { n: number }[] }).rows[0]!.n, 0, '不得残留提醒任务');
   });
+
+  it('事件详情返回提醒规则，编辑表单据此回显', async () => {
+    const created = await json<{ event: { id: string } }>(
+      await request('/api/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: '要回显的事件',
+          startAt: inHours(24),
+          reminderEnabled: true,
+          reminderOffsets: [1440, 60, 10],
+        }),
+      }),
+    );
+
+    const detail = await json<{ rule: { enabled: boolean; offsetsMinutes: number[] } | null }>(
+      await request(`/api/events/${created.event.id}`),
+    );
+    assert.ok(detail.rule, '详情必须带 rule 字段');
+    assert.equal(detail.rule.enabled, true);
+    assert.deepEqual([...detail.rule.offsetsMinutes].sort((a, b) => b - a), [1440, 60, 10]);
+  });
+
+  it('编辑事件但不携带提醒字段时，已保存的提醒设置不被覆盖', async () => {
+    const created = await json<{ event: { id: string } }>(
+      await request('/api/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: '只改标题',
+          startAt: inHours(24),
+          reminderEnabled: true,
+          reminderOffsets: [60, 10],
+        }),
+      }),
+    );
+
+    const res = await request(`/api/events/${created.event.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title: '改了标题' }),
+    });
+    assert.equal(res.status, 200);
+
+    const detail = await json<{ rule: { enabled: boolean; offsetsMinutes: number[] } | null }>(
+      await request(`/api/events/${created.event.id}`),
+    );
+    assert.ok(detail.rule);
+    assert.equal(detail.rule.enabled, true, '一次普通的编辑不得静默关闭提醒');
+    assert.deepEqual([...detail.rule.offsetsMinutes].sort((a, b) => b - a), [60, 10]);
+  });
+
+  it('编辑事件并显式关闭提醒时，规则更新且未发送提醒被取消', async () => {
+    const created = await json<{ event: { id: string } }>(
+      await request('/api/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: '要关提醒的事件',
+          startAt: inHours(24),
+          reminderEnabled: true,
+          reminderOffsets: [60, 10],
+        }),
+      }),
+    );
+
+    const res = await request(`/api/events/${created.event.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ reminderEnabled: false }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal((await json<{ reminder: { cancelled: number } }>(res)).reminder.cancelled, 2);
+
+    const detail = await json<{ rule: { enabled: boolean } | null }>(
+      await request(`/api/events/${created.event.id}`),
+    );
+    assert.equal(detail.rule?.enabled, false, '显式关闭必须生效');
+  });
 });
 
 describe('待办 CRUD 与提醒约束', () => {
@@ -314,6 +388,59 @@ describe('待办 CRUD 与提醒约束', () => {
     assert.equal(body.counts.inbox, 1);
     assert.equal(body.counts.upcoming, 1);
   });
+
+  it('「今天」视图不含无日期待办，且与计数同口径', async () => {
+    await request('/api/tasks', { method: 'POST', body: JSON.stringify({ title: '无日期' }) });
+    await request('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ title: '今天到期', dueDate: new Date().toISOString().slice(0, 10) }),
+    });
+
+    const list = await json<{ tasks: { title: string }[] }>(await request('/api/tasks?view=today'));
+    assert.deepEqual(
+      list.tasks.map((t) => t.title),
+      ['今天到期'],
+      '无日期的待办只属于收件箱，不得混入今天视图',
+    );
+
+    const counts = await json<{ counts: { today: number } }>(await request('/api/tasks/counts'));
+    assert.equal(counts.counts.today, list.tasks.length, '列表与计数必须是同一口径');
+  });
+
+  it('待办详情返回提醒规则，编辑不携带提醒字段时不覆盖原设置', async () => {
+    const created = await json<{ task: { id: string } }>(
+      await request('/api/tasks', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: '要回显的待办',
+          dueDate: '2030-06-15',
+          dueTime: '15:00',
+          reminderEnabled: true,
+          reminderOffsets: [1440],
+        }),
+      }),
+    );
+
+    const detail = await json<{ rule: { enabled: boolean; offsetsMinutes: number[] } | null }>(
+      await request(`/api/tasks/${created.task.id}`),
+    );
+    assert.ok(detail.rule, '详情必须带 rule 字段');
+    assert.equal(detail.rule.enabled, true);
+    assert.deepEqual(detail.rule.offsetsMinutes, [1440]);
+
+    const res = await request(`/api/tasks/${created.task.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title: '改个名字而已' }),
+    });
+    assert.equal(res.status, 200);
+
+    const after = await json<{ rule: { enabled: boolean; offsetsMinutes: number[] } | null }>(
+      await request(`/api/tasks/${created.task.id}`),
+    );
+    assert.ok(after.rule);
+    assert.equal(after.rule.enabled, true, '普通编辑不得静默关闭提醒');
+    assert.deepEqual(after.rule.offsetsMinutes, [1440]);
+  });
 });
 
 describe('日历聚合读视图', () => {
@@ -363,20 +490,30 @@ describe('日历聚合读视图', () => {
     assert.match((await json<{ message: string }>(res)).message, /跨度不能超过/);
   });
 
-  it('总览接口返回今日待办与未来事件', async () => {
-    await request('/api/events', {
+  it('总览接口返回今日到期与逾期未完成的待办', async () => {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    await request('/api/tasks', {
       method: 'POST',
-      body: JSON.stringify({ title: '总览事件', startAt: inHours(24) }),
+      body: JSON.stringify({ title: '今天到期', dueDate: todayStr }),
     });
     await request('/api/tasks', {
       method: 'POST',
-      body: JSON.stringify({ title: '今天到期', dueDate: new Date().toISOString().slice(0, 10) }),
+      body: JSON.stringify({ title: '已逾期未完成', dueDate: yesterday }),
     });
+    await request('/api/tasks', { method: 'POST', body: JSON.stringify({ title: '无日期' }) });
 
-    const body = await json<{ events: unknown[]; tasksDueTodayCount: number }>(
-      await request('/api/calendar/overview'),
+    const body = await json<{
+      today: string;
+      tasksDueTodayCount: number;
+      tasksDueToday: { title: string }[];
+    }>(await request('/api/calendar/overview'));
+
+    assert.equal(body.tasksDueTodayCount, 2, '今天到期 + 逾期未完成；无日期待办不算');
+    assert.ok(
+      body.tasksDueToday.some((t) => t.title === '已逾期未完成'),
+      '逾期未完成的待办必须出现在总览里',
     );
-    assert.equal(body.events.length, 1);
-    assert.equal(body.tasksDueTodayCount, 1);
+    assert.ok(!body.tasksDueToday.some((t) => t.title === '无日期'), '无日期待办留在待办页收件箱');
   });
 });
