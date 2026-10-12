@@ -15,6 +15,13 @@
       "when": 1791731324238,
       "tag": "0001_singleton_admin_and_failure_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791812676027,
+      "tag": "0002_dizzy_banshee",
+      "breakpoints": true
     }
   ]
 }

@@ -314,7 +314,156 @@ export const notificationAttempts = pgTable(
   (t) => [index('notification_attempts_job_idx').on(t.jobId)],
 );
 
+/* ────────────────────────── 微信创建与查询（V1.1） ────────────────────────── */
+
+/**
+ * 入站消息持久化（PRD 8.1）。
+ *
+ * 设计要点（决定了整个接收侧的重构方向）：
+ * - **先落库再处理**：网络轮询在事务外；"插入消息 + 推进游标 + 刷新上下文"在
+ *   同一短事务内提交。原实现把上下文更新放在同步回调里，无法在其中调用模型，
+ *   所以必须把消息先持久化，处理流程移到事务之外。
+ * - 唯一约束建在「绑定代际 + 提供方消息 ID」上，而不是内存里的 seen 数组——
+ *   后者重启即失忆，且长度有限会漏判重复。
+ * - `parse_basis_at` 冻结该条消息的解析时间基准：重试时不得用"当前时间"
+ *   重新解释"明天"（PRD 5）。
+ */
+export const wechatInbox = pgTable(
+  'wechat_inbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bindingGeneration: uuid('binding_generation').notNull(),
+    /** 提供方消息 ID；缺失时由内容哈希兜底（见 lib 中的派生函数） */
+    providerMessageId: text('provider_message_id').notNull(),
+    fromUserId: text('from_user_id').notNull(),
+    /** 第一阶段只处理文本 */
+    messageType: integer('message_type').notNull().default(1),
+    text: text('text').notNull(),
+    contextTokenEnc: text('context_token_enc'),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+    providerTime: timestamp('provider_time', { withTimezone: true }),
+    /** 冻结的解析基准（入站时刻），重试不得改写 */
+    parseBasisAt: timestamp('parse_basis_at', { withTimezone: true }).notNull(),
+    /** pending | processing | done | failed | dead */
+    status: varchar('status', { length: 16 }).notNull().default('pending'),
+    /** 可恢复处理租约；超时可被回收 */
+    leasedUntil: timestamp('leased_until', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
+    lastError: text('last_error'),
+    /** 下次可处理的时刻（退避） */
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    /** 关联的创建/查询操作（若有） */
+    operationId: uuid('operation_id'),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    /** 正文保留期（PRD 16.1-4：7 天），到期只清正文、保留终态凭据 */
+    purgeAfter: timestamp('purge_after', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('wechat_inbox_msg_uq').on(t.bindingGeneration, t.providerMessageId),
+    index('wechat_inbox_claim_idx').on(t.status, t.nextAttemptAt),
+    index('wechat_inbox_purge_idx').on(t.purgeAfter),
+  ],
+);
+
+/**
+ * 创建/查询操作（PRD 8.1）。
+ *
+ * 一个绑定会话**最多一个活动创建操作**（含缺字段、待确认、提交占用），
+ * 由下方 `wechat_operations_active_uq` 偏唯一索引在数据库层保证，
+ * 不依赖应用判断——应用判断在并发与重启面前不可靠。
+ */
+export const wechatOperations = pgTable(
+  'wechat_operations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bindingGeneration: uuid('binding_generation').notNull(),
+    /** create | query */
+    kind: varchar('kind', { length: 16 }).notNull().default('create'),
+    /** 当前草稿类型；仅 kind=create 时有意义 */
+    draftKind: varchar('draft_kind', { length: 16 }),
+    status: varchar('status', { length: 16 }).notNull().default('awaiting_fields'),
+    /** 每次有效修改递增；短码绑定该版本 */
+    version: integer('version').notNull().default(1),
+    /** 确认短码；由服务端生成，模型不得设置 */
+    shortCode: varchar('short_code', { length: 16 }),
+    /** 归一化草稿（含 missingFields 与 providedFields） */
+    draft: jsonb('draft'),
+    /** 缺字段时的追问内容 */
+    missingFields: jsonb('missing_fields'),
+    /** 触发该操作的消息 */
+    sourceInboxId: uuid('source_inbox_id'),
+    /** 幂等键：重启与重复确认复用同一键 */
+    idempotencyKey: text('idempotency_key').notNull().unique(),
+    /** 最近一次预览的发送状态（unknown 时不得把裸确认当同意） */
+    previewRevision: uuid('preview_revision'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    committedAt: timestamp('committed_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    expiredAt: timestamp('expired_at', { withTimezone: true }),
+    /** 提交后的事项 ID（事件或待办） */
+    resultSubjectType: varchar('result_subject_type', { length: 16 }),
+    resultSubjectId: uuid('result_subject_id'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // 同一绑定代际下至多一个活动创建操作（终态为 committed/cancelled/expired）
+    uniqueIndex('wechat_operations_active_uq')
+      .on(t.bindingGeneration)
+      .where(sql`status in ('awaiting_fields','pending_confirm','committing')`),
+    index('wechat_operations_gen_idx').on(t.bindingGeneration, t.createdAt),
+    index('wechat_operations_recent_idx').on(t.bindingGeneration, t.status, t.updatedAt),
+  ],
+);
+
+/**
+ * 回复/通知出站队列（PRD 8.1、7.3）。
+ *
+ * 与 notification_jobs 分开的原因：
+ * - 通知任务面向"事项提醒"，有重试与三态语义；
+ * - 微信回复面向"一次对话应答"，`binding_generation + 操作版本` 变更后
+ *   **必须作废**（换绑或草稿被替代后的旧回复不得发出）。
+ * 发送计数仍统一走既有 8/10 窗口实现（PRD 16.2）。
+ */
+export const wechatOutbox = pgTable(
+  'wechat_outbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bindingGeneration: uuid('binding_generation').notNull(),
+    operationId: uuid('operation_id'),
+    sourceInboxId: uuid('source_inbox_id'),
+    /** 生成该回复时的操作版本；版本变化即作废 */
+    operationVersion: integer('operation_version'),
+    /** preview | created | cancelled | expired | error | help | query | pending | recent | notice */
+    replyType: varchar('reply_type', { length: 16 }).notNull(),
+    /** 正文；7 天后清理，不破坏终态审计 */
+    body: text('body').notNull(),
+    /** 去重键：防止同一次应答重复入队 */
+    dedupeKey: text('dedupe_key').notNull().unique(),
+    /** pending | sending | sent | failed | suppressed | cancelled */
+    status: varchar('status', { length: 16 }).notNull().default('pending'),
+    leasedUntil: timestamp('leased_until', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
+    /** 结果未知：不自动重发（沿用三态策略） */
+    failureKind: varchar('failure_kind', { length: 16 }),
+    lastError: text('last_error'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    purgeAfter: timestamp('purge_after', { withTimezone: true }),
+  },
+  (t) => [
+    index('wechat_outbox_claim_idx').on(t.status, t.nextAttemptAt),
+    index('wechat_outbox_gen_idx').on(t.bindingGeneration),
+    index('wechat_outbox_purge_idx').on(t.purgeAfter),
+  ],
+);
+
 /* ────────────────────────── 设置 ────────────────────────── */
+
 
 export const settings = pgTable('settings', {
   key: varchar('key', { length: 64 }).primaryKey(),
