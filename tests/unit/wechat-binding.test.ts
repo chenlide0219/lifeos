@@ -41,7 +41,9 @@ before(async () => {
       ilink_bot_id: 'lifeos-bot', ilink_user_id: 'owner@im.wechat', baseurl: 'https://ilinkai.weixin.qq.com' });
     if (url.includes('getupdates')) return response({ ret: 0, get_updates_buf: `cursor-${inboundId}`,
       msgs: inbound ? [{ message_type: 1, from_user_id: 'owner@im.wechat', message_id: inboundId,
-        create_time_ms: Date.now() + 1000, context_token: `context-${inboundId}` }] : [] });
+        create_time_ms: Date.now() + 1000, context_token: `context-${inboundId}`,
+        // 真实文本消息必然带正文；缺少它会让"绑定用户消息"无法被识别为可处理文本
+        item_list: [{ type: 1, text_item: { text: '明天下午三点开组会' } }] }] : [] });
     if (url.includes('sendmessage')) {
       sends++;
       const body = JSON.parse(String(init?.body)) as { msg: { item_list: { text_item: { text: string } }[] } };

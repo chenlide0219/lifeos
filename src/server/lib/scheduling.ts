@@ -21,6 +21,22 @@ import { addDays, zonedToInstant } from './time';
 
 export type SubjectType = 'event' | 'task' | 'subscription';
 
+/**
+ * 事务客户端的结构化类型（只声明本模块用到的方法）。
+ *
+ * 为什么需要它：PRD 7.2 要求"事项创建 + 提醒规则与任务调整 + 操作标记 + 回复入队"
+ * 在**同一事务**中完成。原实现只接受全局 `db`，导致共享创建服务无法做到原子——
+ * 这里把客户端作为可选参数贯穿，Web 路由保持传 `db`（行为不变），
+ * 微信创建服务传事务对象。
+ */
+export type Scheduler = {
+  select: typeof db.select;
+  insert: typeof db.insert;
+  update: typeof db.update;
+  delete: typeof db.delete;
+  execute: typeof db.execute;
+};
+
 /** 未发送的任务状态：只有这些会被变更操作取消 */
 const ACTIVE_JOB_STATUSES = ['pending', 'sending'] as const;
 
@@ -41,8 +57,12 @@ type ReminderPlan = {
   body: string;
 };
 
-export function cancelActiveNotifications(subjectType: SubjectType, subjectId: string): Promise<number> {
-  return db
+export function cancelActiveNotifications(
+  subjectType: SubjectType,
+  subjectId: string,
+  scheduler: Scheduler = db,
+): Promise<number> {
+  return scheduler
     .update(notificationJobs)
     .set({
       status: 'cancelled',
@@ -69,10 +89,11 @@ export async function upsertRule(
   subjectType: SubjectType,
   subjectId: string,
   input: ReminderRuleInput,
+  scheduler: Scheduler = db,
 ): Promise<string> {
   const offsets = normalizeOffsets(input.offsetsMinutes);
 
-  const [row] = await db
+  const [row] = await scheduler
     .insert(notificationRules)
     .values({
       subjectType,
@@ -115,8 +136,8 @@ export function buildIdempotencyKey(
   return `${subjectType}:${subjectId}:${offsetMinutes}:${fireAt.toISOString()}`;
 }
 
-async function loadRule(subjectType: 'event' | 'task', subjectId: string) {
-  const [rule] = await db
+async function loadRule(subjectType: 'event' | 'task', subjectId: string, scheduler: Scheduler = db) {
+  const [rule] = await scheduler
     .select({
       id: notificationRules.id,
       enabled: notificationRules.enabled,
@@ -145,6 +166,7 @@ async function applyPlan(
   subjectId: string,
   ruleId: string,
   plan: ReminderPlan[],
+  scheduler: Scheduler = db,
 ): Promise<{ created: number; resurrected: number; cancelled: number; skippedSent: number }> {
   const keys = plan.map((p) => buildIdempotencyKey(subjectType, subjectId, p.offsetMinutes, p.fireAt));
 
@@ -156,7 +178,7 @@ async function applyPlan(
   ];
   if (keys.length > 0) cancelWhere.push(notInArray(notificationJobs.idempotencyKey, keys));
 
-  const cancelledRows = await db
+  const cancelledRows = await scheduler
     .update(notificationJobs)
     .set({
       status: 'cancelled',
@@ -176,14 +198,14 @@ async function applyPlan(
   for (const item of plan) {
     const key = buildIdempotencyKey(subjectType, subjectId, item.offsetMinutes, item.fireAt);
 
-    const [existing] = await db
+    const [existing] = await scheduler
       .select({ id: notificationJobs.id, status: notificationJobs.status })
       .from(notificationJobs)
       .where(eq(notificationJobs.idempotencyKey, key))
       .limit(1);
 
     if (!existing) {
-      await db.insert(notificationJobs).values({
+      await scheduler.insert(notificationJobs).values({
         ruleId,
         subjectType,
         subjectId,
@@ -203,7 +225,7 @@ async function applyPlan(
       continue;
     }
 
-    await db
+    await scheduler
       .update(notificationJobs)
       .set({
         status: 'pending',
@@ -227,8 +249,8 @@ async function applyPlan(
 }
 
 /** 依据事件当前状态重建提醒 */
-export async function rebuildEventNotifications(eventId: string): Promise<RebuildResult> {
-  const [event] = await db
+export async function rebuildEventNotifications(eventId: string, scheduler: Scheduler = db): Promise<RebuildResult> {
+  const [event] = await scheduler
     .select({
       id: events.id,
       title: events.title,
@@ -252,13 +274,13 @@ export async function rebuildEventNotifications(eventId: string): Promise<Rebuil
   };
 
   if (event.status !== 'active') {
-    const cancelled = await cancelActiveNotifications('event', eventId);
+    const cancelled = await cancelActiveNotifications('event', eventId, scheduler);
     return { ...empty, cancelled };
   }
 
-  const rule = await loadRule('event', eventId);
+  const rule = await loadRule('event', eventId, scheduler);
   if (!rule || !rule.enabled) {
-    const cancelled = await cancelActiveNotifications('event', eventId);
+    const cancelled = await cancelActiveNotifications('event', eventId, scheduler);
     return { ...empty, cancelled };
   }
 
@@ -284,7 +306,7 @@ export async function rebuildEventNotifications(eventId: string): Promise<Rebuil
     });
   }
 
-  const applied = await applyPlan('event', eventId, rule.id, plan);
+  const applied = await applyPlan('event', eventId, rule.id, plan, scheduler);
   return { ...applied, skippedPast, ruleEnabled: true };
 }
 
@@ -294,8 +316,8 @@ export async function rebuildEventNotifications(eventId: string): Promise<Rebuil
  * PRD FR-02：有日期无具体时刻的待办是全天项目，**不能**精确到分钟提醒；
  * 要精确提醒必须补上具体时刻。因此没有 dueTime 时一律不排提醒。
  */
-export async function rebuildTaskNotifications(taskId: string): Promise<RebuildResult> {
-  const [task] = await db
+export async function rebuildTaskNotifications(taskId: string, scheduler: Scheduler = db): Promise<RebuildResult> {
+  const [task] = await scheduler
     .select({
       id: tasks.id,
       title: tasks.title,
@@ -319,13 +341,13 @@ export async function rebuildTaskNotifications(taskId: string): Promise<RebuildR
   };
 
   if (task.status !== 'todo' || !task.dueDate || !task.dueTime) {
-    const cancelled = await cancelActiveNotifications('task', taskId);
+    const cancelled = await cancelActiveNotifications('task', taskId, scheduler);
     return { ...empty, cancelled };
   }
 
-  const rule = await loadRule('task', taskId);
+  const rule = await loadRule('task', taskId, scheduler);
   if (!rule || !rule.enabled) {
-    const cancelled = await cancelActiveNotifications('task', taskId);
+    const cancelled = await cancelActiveNotifications('task', taskId, scheduler);
     return { ...empty, cancelled };
   }
 
@@ -352,7 +374,7 @@ export async function rebuildTaskNotifications(taskId: string): Promise<RebuildR
     });
   }
 
-  const applied = await applyPlan('task', taskId, rule.id, plan);
+  const applied = await applyPlan('task', taskId, rule.id, plan, scheduler);
   return { ...applied, skippedPast, ruleEnabled: true };
 }
 

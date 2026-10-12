@@ -80,20 +80,47 @@ export function toInbound(message: Record<string, unknown>): InboundMessage | nu
   };
 }
 
+/**
+ * 从消息载荷里取文本。
+ *
+ * 必须宽容：真实 iLink 文本消息的正文在 `item_list[].text_item.text`，
+ * 但只认这一种形状太脆——上游字段一旦调整，消息会被**静默丢弃**，
+ * 表现为"微信里发了但系统毫无反应"，这类故障极难排查。
+ * 因此依次尝试若干合理形状，并支持 item 直接带 `text`。
+ */
 function extractTextFromMessage(message: Record<string, unknown>): string | null {
+  const asText = (value: unknown): string | null =>
+    typeof value === 'string' && value.trim() ? value.trim() : null;
+
   const items = message.item_list;
-  if (!Array.isArray(items)) return null;
-  const parts: string[] = [];
-  for (const item of items) {
-    if (!item || typeof item !== 'object') continue;
-    const entry = item as Record<string, unknown>;
-    if (entry.type !== 1) continue;
-    const textItem = entry.text_item;
-    if (!textItem || typeof textItem !== 'object') continue;
-    const text = (textItem as Record<string, unknown>).text;
-    if (typeof text === 'string' && text.trim()) parts.push(text.trim());
+  if (Array.isArray(items)) {
+    const parts: string[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const entry = item as Record<string, unknown>;
+      // item type 1 = 文本；缺少 type 时也尝试取值，避免整条消息被丢
+      if (entry.type !== undefined && entry.type !== 1) continue;
+
+      const textItem = entry.text_item;
+      if (textItem && typeof textItem === 'object') {
+        const fromItem = asText((textItem as Record<string, unknown>).text);
+        if (fromItem) {
+          parts.push(fromItem);
+          continue;
+        }
+      }
+      const direct = asText(entry.text);
+      if (direct) parts.push(direct);
+    }
+    if (parts.length > 0) return parts.join('\n');
   }
-  return parts.length > 0 ? parts.join('\n') : null;
+
+  // 退化形状：正文直接放在顶层
+  for (const key of ['text', 'content', 'msg_text']) {
+    const found = asText(message[key]);
+    if (found) return found;
+  }
+  return null;
 }
 
 /**
@@ -127,9 +154,19 @@ export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutco
 
   const candidates = collectMessages(data);
   const inbound: InboundMessage[] = [];
+  // 绑定用户发来的文本消息若提取不到正文，说明上游载荷形状与预期不符。
+  // 这种消息会被丢弃，但**必须留下痕迹**：否则表现为"微信里发了、系统毫无反应"，
+  // 是最难排查的一类故障。
+  let unparsableText = 0;
   for (const candidate of candidates) {
+    const isTextFromBoundUser =
+      Number(candidate.message_type ?? 0) === 1 && candidate.from_user_id === account.userId;
     const message = toInbound(candidate);
-    if (message) inbound.push(message);
+    if (message) {
+      inbound.push(message);
+    } else if (isTextFromBoundUser) {
+      unparsableText += 1;
+    }
   }
 
   // 上下文取**最后一条**有效消息的 token（时间已排序）
@@ -150,7 +187,19 @@ export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutco
     boundUserId: account.userId,
   });
 
-  return { bound: true, inserted: result.inserted, duplicated: result.duplicated, upstreamError: null };
+  if (unparsableText > 0) {
+    await updateWechatState((s) => {
+      if (s.generation !== initial.generation || !s.account) return;
+      s.listenerError = `收到 ${unparsableText} 条无法解析正文的文本消息，可能上游载荷格式有变化`;
+    });
+  }
+
+  return {
+    bound: true,
+    inserted: result.inserted,
+    duplicated: result.duplicated,
+    upstreamError: unparsableText > 0 ? `有 ${unparsableText} 条文本消息无法解析正文` : null,
+  };
 }
 
 /** 监听循环：轮询 → 短暂停顿 → 再轮询。异常不终止循环，只记录状态。 */

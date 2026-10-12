@@ -62,6 +62,11 @@ async function installBoundState(generation: string): Promise<void> {
   });
 }
 
+/** 清理私有渠道状态，避免污染同库运行的其他测试（尤其是依赖旧式通道的 worker 用例） */
+async function clearState(): Promise<void> {
+  await db.execute(sql`DELETE FROM settings WHERE key = 'wechat.private-channel'`);
+}
+
 const { persistInbound } = await import('../../src/server/lib/wechat-inbox');
 
 function message(overrides: Partial<Parameters<typeof deriveProviderMessageId>[0]> = {}) {
@@ -82,6 +87,7 @@ before(async () => {
   await db.execute(sql`DELETE FROM wechat_inbox`);
   await db.execute(sql`DELETE FROM wechat_operations`);
   await db.execute(sql`DELETE FROM wechat_outbox`);
+  await clearState();
 });
 
 beforeEach(async () => {
@@ -93,6 +99,12 @@ beforeEach(async () => {
 after(async () => {
   await db.execute(sql`DELETE FROM wechat_inbox`);
   await db.execute(sql`DELETE FROM wechat_operations`);
+  // 关键：必须清掉私有状态行。
+  // 本文件会写入一个"假的已绑定 account"来测试入库过滤；而 notification provider
+  // 一旦看到 account 就会走扫码发送路径（缺少 context 时**推迟**发送），
+  // 会让 worker.test.ts 中依赖旧式 ILINK_TOKEN 通道的用例全部失败
+  // （表现为任务停在 pending 而不是 failed）。这与 wechat-binding.test.ts 的清理一致。
+  await clearState();
   await pool.end();
 });
 
