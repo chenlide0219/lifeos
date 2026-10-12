@@ -280,4 +280,57 @@ describe('创建闭环与投递选择', () => {
     const createdCount = sentTexts.filter((t) => /已创建/.test(t)).length;
     assert.equal(createdCount, 1, '创建回执只应发出一次');
   });
+
+  it('草稿过期后必须明确告知用户未保存（PRD 3.4）', async () => {
+    await feed('/add 明天下午三点开组会', 'loop-exp-1');
+    await runBatch();
+    const draft = await loadActiveOperation(GEN);
+    assert.ok(draft, '应建立草稿');
+
+    // 把草稿的到期时间推到过去，模拟"放了超过 30 分钟"
+    await db.execute(
+      sql`UPDATE wechat_operations SET expires_at = now() - interval '5 minutes' WHERE id = ${draft!.id}`,
+    );
+
+    // 下一条消息会先让过期草稿失效
+    await feed('/today', 'loop-exp-2');
+    await runBatch();
+
+    // 草稿必须已进入 expired 终态
+    const row = await db.execute<{ status: string }>(
+      sql`SELECT status FROM wechat_operations WHERE id = ${draft!.id}`,
+    );
+    assert.equal(row.rows![0]!.status, 'expired');
+
+    // 必须发出过期通知，而不是静默失效
+    await sendPendingReplies(10);
+    const notice = sentTexts.find((t) => /已过期/.test(t));
+    assert.ok(notice, `应告知草稿已过期，实际发出：${JSON.stringify(sentTexts)}`);
+    assert.match(notice!, /未保存/, '必须说明未保存');
+    assert.match(notice!, /已失效/, '应说明旧短码失效');
+
+    // 过期后用过旧短码确认：不得写库
+    await feed(`确认 ${draft!.shortCode}`, 'loop-exp-3');
+    await runBatch();
+    const ev = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM events`);
+    assert.equal(ev.rows![0]!.n, 0, '过期草稿的短码不得写库');
+  });
+
+  it('过期通知只发一次（重复处理不重复打扰）', async () => {
+    await feed('/add 明天下午三点开组会', 'loop-exp-4');
+    await runBatch();
+    const draft = await loadActiveOperation(GEN);
+    await db.execute(
+      sql`UPDATE wechat_operations SET expires_at = now() - interval '5 minutes' WHERE id = ${draft!.id}`,
+    );
+
+    await feed('/today', 'loop-exp-5');
+    await runBatch();
+    await feed('/today', 'loop-exp-6');
+    await runBatch();
+
+    await sendPendingReplies(10);
+    const notices = sentTexts.filter((t) => /已过期/.test(t));
+    assert.equal(notices.length, 1, '过期通知只应发出一次（去重键）');
+  });
 });

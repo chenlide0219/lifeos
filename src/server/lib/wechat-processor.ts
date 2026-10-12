@@ -87,8 +87,23 @@ export async function processInboxMessage(
   }
 
   try {
-    // 先让过期的草稿失效，避免把新消息补到一个早已过期的草稿上
-    await expireStaleOperations(now);
+    // 先让过期的草稿失效，避免把新消息补到一个早已过期的草稿上。
+    // 过期的必须**告知用户**（PRD 3.4）：只改状态的话，用户下次回复确认短码
+    // 只会得到"短码不正确"，既不知道草稿已过期、也不知道它去了哪里。
+    const expired = await expireStaleOperations(now);
+    for (const item of expired) {
+      await enqueueReply(db, {
+        bindingGeneration: item.bindingGeneration,
+        operationId: item.id,
+        replyType: 'expired',
+        body:
+          `上一草稿${item.title ? `「${item.title}」` : ''}已过期（超过 30 分钟未确认），**未保存**。\n` +
+          (item.shortCode ? `旧短码 ${item.shortCode} 已失效。\n` : '') +
+          '直接重新发送一次内容即可再建草稿。',
+        dedupeKey: `expired:${item.id}`,
+        now,
+      });
+    }
 
     const operation = await loadActiveOperation(message.bindingGeneration);
     const active = operation ? toActiveView(operation) : null;

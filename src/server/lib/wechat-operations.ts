@@ -240,14 +240,35 @@ export async function cancelOperation(operationId: string, now = new Date()): Pr
   return rows.length > 0;
 }
 
-/** 过期（PRD 16.1-4）：由处理器在发现超期时标记，旧短码随之失效 */
-export async function expireStaleOperations(now = new Date()): Promise<number> {
+/**
+ * 过期（PRD 16.1-4）：由处理器在发现超期时标记，旧短码随之失效。
+ *
+ * 返回被过期的操作（含代际与短码），因为 **PRD 3.4 要求过期时明确提示用户**
+ * "上一草稿已过期，未保存"。只改状态不通知的话，用户会在回复确认短码时
+ * 只得到"短码不正确"，既不知道草稿已过期、也不知道它去了哪里。
+ */
+export async function expireStaleOperations(
+  now = new Date(),
+): Promise<{ id: string; bindingGeneration: string; shortCode: string | null; title: string | null }[]> {
   const rows = await db
     .update(wechatOperations)
     .set({ status: 'expired', expiredAt: now, updatedAt: now })
     .where(and(inArray(wechatOperations.status, [...ACTIVE_STATUSES]), sql`${wechatOperations.expiresAt} <= ${now.toISOString()}`))
-    .returning({ id: wechatOperations.id });
-  return rows.length;
+    .returning({
+      id: wechatOperations.id,
+      bindingGeneration: wechatOperations.bindingGeneration,
+      shortCode: wechatOperations.shortCode,
+      draft: wechatOperations.draft,
+    });
+  return rows.map((r) => {
+    const draft = (r.draft as { title?: string } | null) ?? null;
+    return {
+      id: r.id,
+      bindingGeneration: r.bindingGeneration,
+      shortCode: r.shortCode,
+      title: typeof draft?.title === 'string' && draft.title.trim() ? draft.title : null,
+    };
+  });
 }
 
 /** 换绑/解绑：活动草稿作废（PRD 6、7.3） */
