@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ApiError, api, type CalendarItemDto } from '../api';
+import { ApiError, api, type CalendarItemDto, type EventDto } from '../api';
 import { IconPlus } from '../components/Icons';
 import { QuickAddDialog, type QuickAddMode } from '../components/QuickAdd';
+import { formatOffset } from '../components/ReminderOffsets';
 import { Alert, Card, PageHeader, Spinner, TypeBadge } from '../components/ui';
 
 const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
@@ -26,6 +27,8 @@ const TYPE_STYLE: Record<FilterKey, string> = {
   task: 'bg-task-soft text-task border-task/30',
   subscription: 'bg-subscription-soft text-subscription border-subscription/30',
 };
+
+type EventDetail = Awaited<ReturnType<typeof api.events.get>>;
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -75,6 +78,11 @@ export function CalendarPage() {
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<QuickAddMode>('event');
+  const [editingEvent, setEditingEvent] = useState<EventDto | null>(null);
+  const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
+  const [eventError, setEventError] = useState<string | null>(null);
+  const [eventLoadingId, setEventLoadingId] = useState<string | null>(null);
+  const [busyEventId, setBusyEventId] = useState<string | null>(null);
 
   /** 当前视图需要覆盖的日期范围（含前后冗余，避免跨视图出现空洞） */
   const range = useMemo(() => {
@@ -142,6 +150,56 @@ export function CalendarPage() {
     });
   }
 
+  async function openEvent(id: string) {
+    setEventLoadingId(id);
+    setError(null);
+    setEventError(null);
+    try {
+      setEventDetail(await api.events.get(id));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '读取事件详情失败');
+    } finally {
+      setEventLoadingId(null);
+    }
+  }
+
+  async function removeEvent(event: EventDto) {
+    if (!window.confirm(`删除事件「${event.title}」？该操作不可恢复，未发送的提醒会一并取消。`)) return;
+    setBusyEventId(event.id);
+    setEventError(null);
+    try {
+      await api.events.remove(event.id);
+      setEventDetail(null);
+      await load();
+    } catch (err) {
+      setEventError(err instanceof ApiError ? err.message : '删除事件失败');
+    } finally {
+      setBusyEventId(null);
+    }
+  }
+
+  function editEvent(event: EventDto) {
+    setEventDetail(null);
+    setEditingEvent(event);
+    setDialogMode('event');
+    setDialogOpen(true);
+  }
+
+  function renderCalendarTitle(item: CalendarItemDto) {
+    if (item.type !== 'event') return <span>{item.title}</span>;
+    return (
+      <button
+        type="button"
+        className="text-left font-medium text-event underline decoration-event/30 underline-offset-2 hover:decoration-event"
+        disabled={eventLoadingId === item.id}
+        onClick={() => void openEvent(item.id)}
+        aria-label={`查看事件「${item.title}」详情`}
+      >
+        {item.title}
+      </button>
+    );
+  }
+
   const monthCells = useMemo(() => {
     const [y, m] = anchorDate.split('-').map(Number);
     const first = new Date(Date.UTC(y!, m! - 1, 1));
@@ -188,6 +246,7 @@ export function CalendarPage() {
   }
 
   const selectedItems = byDate.get(selected) ?? [];
+  const dayItems = byDate.get(anchorDate) ?? [];
   const mobileAgendaDates = view === 'month'
     ? monthCells.filter((cell) => cell.inMonth && (byDate.get(cell.key)?.length ?? 0) > 0).map((cell) => cell.key)
     : weekDays.filter((day) => (byDate.get(day.key)?.length ?? 0) > 0).map((day) => day.key);
@@ -213,7 +272,7 @@ export function CalendarPage() {
                       </span>
                       <TypeBadge type={item.type} />
                       <span className={`min-w-0 flex-1 break-words text-sm leading-5 ${item.inactive ? 'text-muted line-through' : ''}`}>
-                        {item.title}
+                        {renderCalendarTitle(item)}
                       </span>
                     </li>
                   ))}
@@ -230,12 +289,13 @@ export function CalendarPage() {
     <>
       <PageHeader
         title="日历"
-        description="事件、待办与订阅周期事项统一展示，可按类型筛选"
+        description="点击事件标题可查看详情、编辑或删除；也可按类型筛选"
         action={
           <button
             type="button"
             className="btn-primary"
             onClick={() => {
+              setEditingEvent(null);
               setDialogMode('event');
               setDialogOpen(true);
             }}
@@ -282,7 +342,10 @@ export function CalendarPage() {
                 <button
                   key={v.key}
                   type="button"
-                  onClick={() => setView(v.key)}
+                  onClick={() => {
+                    if (v.key === 'day') setAnchorDate(selected);
+                    setView(v.key);
+                  }}
                   aria-pressed={view === v.key}
                   className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
                     view === v.key ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'
@@ -330,6 +393,7 @@ export function CalendarPage() {
                     type="button"
                     onClick={() => {
                       setSelected(cell.key);
+                      if (!cell.inMonth) setAnchorDate(cell.key);
                       document.getElementById(`agenda-${cell.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     }}
                     className={`min-h-[3.25rem] border-b border-r border-line p-1 text-left align-top transition-colors last:border-r-0 sm:min-h-[6.5rem] sm:p-1.5 ${
@@ -421,18 +485,18 @@ export function CalendarPage() {
           <div className="p-5">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold">{anchorDate}</h3>
-              <span className="text-xs text-muted">{selectedItems.length} 项</span>
+              <span className="text-xs text-muted">{dayItems.length} 项</span>
             </div>
-            {selectedItems.length === 0 ? (
+            {dayItems.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted">这一天没有安排</p>
             ) : (
               <ul className="divide-y divide-line">
-                {selectedItems.map((item) => (
+                {dayItems.map((item) => (
                   <li key={`${item.type}-${item.id}`} className="flex items-center gap-3 py-3 first:pt-0">
                     <span className="w-14 shrink-0 text-xs text-muted">{item.allDay ? '全天' : item.time}</span>
                     <TypeBadge type={item.type} />
-                    <span className={`min-w-0 flex-1 truncate text-sm ${item.inactive ? 'text-muted line-through' : ''}`}>
-                      {item.title}
+                    <span className={`min-w-0 flex-1 break-words text-sm ${item.inactive ? 'text-muted line-through' : ''}`}>
+                      {renderCalendarTitle(item)}
                     </span>
                     {typeof item.meta?.location === 'string' && item.meta.location ? (
                       <span className="shrink-0 text-xs text-muted">{item.meta.location}</span>
@@ -446,6 +510,7 @@ export function CalendarPage() {
                 type="button"
                 className="btn-ghost"
                 onClick={() => {
+                  setEditingEvent(null);
                   setDialogMode('event');
                   setDialogOpen(true);
                 }}
@@ -456,6 +521,7 @@ export function CalendarPage() {
                 type="button"
                 className="btn-ghost"
                 onClick={() => {
+                  setEditingEvent(null);
                   setDialogMode('task');
                   setDialogOpen(true);
                 }}
@@ -486,8 +552,8 @@ export function CalendarPage() {
               {selectedItems.map((item) => (
                 <li key={`${item.type}-${item.id}`} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
                   <TypeBadge type={item.type} />
-                  <span className={`min-w-0 flex-1 truncate text-sm ${item.inactive ? 'text-muted line-through' : ''}`}>
-                    {item.title}
+                  <span className={`min-w-0 flex-1 break-words text-sm ${item.inactive ? 'text-muted line-through' : ''}`}>
+                    {renderCalendarTitle(item)}
                   </span>
                   <span className="shrink-0 text-xs text-muted">{item.allDay ? '全天' : item.time}</span>
                 </li>
@@ -499,6 +565,7 @@ export function CalendarPage() {
               type="button"
               className="btn-ghost"
               onClick={() => {
+                setEditingEvent(null);
                 setDialogMode('event');
                 setDialogOpen(true);
               }}
@@ -509,6 +576,7 @@ export function CalendarPage() {
               type="button"
               className="btn-ghost"
               onClick={() => {
+                setEditingEvent(null);
                 setDialogMode('task');
                 setDialogOpen(true);
               }}
@@ -519,10 +587,51 @@ export function CalendarPage() {
         </Card>
       ) : null}
 
+      {eventDetail ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4" onClick={() => setEventDetail(null)}>
+          <div
+            className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-pop sm:rounded-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label="事件详情"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="chip bg-event-soft text-event">事件</span>
+                <h2 className="mt-2 break-words text-lg font-semibold">{eventDetail.event.title}</h2>
+              </div>
+              <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={() => setEventDetail(null)}>关闭</button>
+            </div>
+            <dl className="mt-4 space-y-2 text-sm">
+              <div><dt className="text-muted">开始</dt><dd>{new Date(eventDetail.event.startAt).toLocaleString('zh-CN', { hour12: false })}</dd></div>
+              {eventDetail.event.endAt ? <div><dt className="text-muted">结束</dt><dd>{new Date(eventDetail.event.endAt).toLocaleString('zh-CN', { hour12: false })}</dd></div> : null}
+              {eventDetail.event.location ? <div><dt className="text-muted">地点</dt><dd className="break-words">{eventDetail.event.location}</dd></div> : null}
+              {eventDetail.event.note ? <div><dt className="text-muted">备注</dt><dd className="whitespace-pre-wrap break-words">{eventDetail.event.note}</dd></div> : null}
+              <div><dt className="text-muted">状态</dt><dd>{eventDetail.event.status === 'active' ? '进行中' : '已取消'}</dd></div>
+              <div><dt className="text-muted">微信提醒</dt><dd>{eventDetail.rule?.enabled ? `已开启 · ${(eventDetail.rule.offsetsMinutes ?? []).map(formatOffset).join('、')}` : '未开启'}</dd></div>
+            </dl>
+            {eventError ? <div className="mt-3"><Alert>{eventError}</Alert></div> : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="btn-ghost text-red-500" disabled={busyEventId === eventDetail.event.id} onClick={() => void removeEvent(eventDetail.event)}>
+                删除
+              </button>
+              {eventDetail.event.status === 'active' ? (
+                <button type="button" className="btn-primary" onClick={() => editEvent(eventDetail.event)}>编辑</button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <QuickAddDialog
         open={dialogOpen}
         mode={dialogMode}
-        onClose={() => setDialogOpen(false)}
+        event={editingEvent}
+        onClose={() => {
+          setDialogOpen(false);
+          setEditingEvent(null);
+        }}
         onSaved={() => void load()}
       />
     </>
