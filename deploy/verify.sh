@@ -142,7 +142,25 @@ else
 fi
 
 if grep -q '^BACKUP_OFFSITE=.\+' /opt/lifeos/.env 2>/dev/null; then
-  ok '已配置异机备份目标'
+  OFFSITE="$(grep '^BACKUP_OFFSITE=' /opt/lifeos/.env | cut -d= -f2-)"
+  OFFSITE_HOST="${OFFSITE%%:*}"
+  OFFSITE_DIR="${OFFSITE#*:}"
+
+  # 不只看配置存在，而是真的验证"能不能连上、远端有没有备份"——
+  # 只检查配置会把"配了但从没传成功"误判为通过
+  if ssh -o BatchMode=yes -o ConnectTimeout=10 "$OFFSITE_HOST" true 2>/dev/null; then
+    remote_count="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$OFFSITE_HOST" \
+      "find '$OFFSITE_DIR/daily' -maxdepth 1 -type f -name 'lifeos-*.sql.gz.gpg' 2>/dev/null | wc -l" 2>/dev/null || echo 0)"
+    if [ "${remote_count:-0}" -ge 1 ]; then
+      remote_latest="$(ssh -o BatchMode=yes "$OFFSITE_HOST" \
+        "find '$OFFSITE_DIR/daily' -maxdepth 1 -type f -name 'lifeos-*.sql.gz.gpg' -printf '%f\n' 2>/dev/null | sort | tail -1" 2>/dev/null)"
+      ok "异机备份可达，远端已有 $remote_count 份（最新：$remote_latest）"
+    else
+      bad "异机目标可达，但远端没有任何备份——上传从未成功"
+    fi
+  else
+    bad "无法连接异机备份目标 $OFFSITE_HOST"
+  fi
 else
   note '未配置 BACKUP_OFFSITE —— 本地加密备份已完成，异机段见 BLOCKED.md'
 fi
