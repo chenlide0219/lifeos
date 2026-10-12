@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError, api, type SystemStatusResponse } from '../api';
 import { IconLogout } from '../components/Icons';
 import { NotificationLog } from '../components/NotificationLog';
+import { TestSendPanel } from '../components/TestSend';
 import { Alert, Card, PageHeader, Spinner, StatusDot } from '../components/ui';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme, type ThemeMode } from '../hooks/useTheme';
@@ -197,6 +198,9 @@ export function SettingsPage() {
         subtitle="提醒任务的状态、错过原因与失败明细（结果未知的任务需人工核实手机是否已收到）"
         className="mt-4"
       >
+        <div className="mb-4 border-b border-line pb-4">
+          <TestSendPanel />
+        </div>
         <NotificationLog />
       </Card>
 

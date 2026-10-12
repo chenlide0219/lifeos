@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { notificationAttempts, notificationJobs } from '../db/schema';
 import { getProviderStatuses } from '../lib/provider-status';
-import { requireAuth, type AppEnv } from '../middleware/auth';
+import { rateLimit } from '../lib/ratelimit';
+import { clientIp, requireAuth, type AppEnv } from '../middleware/auth';
 import { listProviders } from '../../worker/registry';
 
 export const notificationRoutes = new Hono<AppEnv>();
@@ -14,6 +16,104 @@ type JobStatus = (typeof STATUSES)[number];
 notificationRoutes.get('/providers', requireAuth, async (c) => {
   const { statuses, probedAt } = await getProviderStatuses();
   return c.json({ providers: statuses, probedAt });
+});
+
+/**
+ * 发送测试消息（PRD FR-07：设置页支持"发送测试微信消息"）。
+ *
+ * 关键约束：**不伪造结果**。
+ *   - 渠道未配置 → 直接拒绝，不排队、不假装已发送；
+ *   - 渠道已配置 → 只把任务排入队列，返回 jobId，由界面轮询真实结果；
+ *     是否送达以通知任务与发送尝试的记录为准，绝不凭 HTTP 响应推断。
+ */
+notificationRoutes.post('/test', requireAuth, async (c) => {
+  const limited = rateLimit(`notify-test:${clientIp(c)}`, 5, 10 * 60 * 1000);
+  if (!limited.ok) {
+    return c.json(
+      { error: 'rate_limited', message: `测试消息发送过于频繁，请 ${limited.retryAfterSeconds} 秒后再试` },
+      429,
+    );
+  }
+
+  const provider = listProviders()[0];
+  if (!provider || !provider.isConfigured()) {
+    return c.json(
+      {
+        error: 'provider_not_configured',
+        message: provider
+          ? `发送通道未配置，测试消息未排队也不会发出。${provider.describe().detail}`
+          : '没有注册任何通知渠道',
+        provider: provider ? provider.describe() : null,
+      },
+      503,
+    );
+  }
+
+  const jobId = randomUUID();
+  const now = new Date();
+
+  const [job] = await db
+    .insert(notificationJobs)
+    .values({
+      ruleId: null,
+      subjectType: 'system',
+      subjectId: randomUUID(),
+      title: 'Life OS 测试消息',
+      body: '这是一条测试消息，用于验证微信通道是否可用。收到即说明通道正常。',
+      fireAt: now,
+      status: 'pending',
+      // 测试消息只尝试一次：用户就在跟前，失败会立刻看到，无需后台反复重试
+      maxAttempts: 1,
+      idempotencyKey: `test:${jobId}`,
+    })
+    .returning({ id: notificationJobs.id, status: notificationJobs.status, fireAt: notificationJobs.fireAt });
+
+  return c.json(
+    {
+      job: job!,
+      provider: provider.describe(),
+      note: '已排入队列，Worker 会在下一次轮询时发送；结果以任务记录为准，界面会自动查询。',
+    },
+    202,
+  );
+});
+
+/** 查询测试消息的真实结果（供界面轮询） */
+notificationRoutes.get('/test/:jobId', requireAuth, async (c) => {
+  const jobId = c.req.param('jobId');
+  if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
+    return c.json({ error: 'invalid_request', message: '任务 ID 格式不正确' }, 400);
+  }
+
+  const [job] = await db
+    .select({
+      id: notificationJobs.id,
+      status: notificationJobs.status,
+      failureKind: notificationJobs.failureKind,
+      attempts: notificationJobs.attempts,
+      maxAttempts: notificationJobs.maxAttempts,
+      lastError: notificationJobs.lastError,
+      fireAt: notificationJobs.fireAt,
+      sentAt: notificationJobs.sentAt,
+    })
+    .from(notificationJobs)
+    .where(and(eq(notificationJobs.id, jobId), eq(notificationJobs.subjectType, 'system')))
+    .limit(1);
+
+  if (!job) return c.json({ error: 'not_found', message: '测试任务不存在' }, 404);
+
+  const attempts = await db
+    .select({
+      attemptedAt: notificationAttempts.attemptedAt,
+      success: notificationAttempts.success,
+      error: notificationAttempts.error,
+    })
+    .from(notificationAttempts)
+    .where(eq(notificationAttempts.jobId, jobId))
+    .orderBy(desc(notificationAttempts.attemptedAt))
+    .limit(10);
+
+  return c.json({ job, attempts });
 });
 
 /**

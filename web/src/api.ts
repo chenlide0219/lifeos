@@ -337,6 +337,29 @@ export const api = {
     return request<NotificationJobsResponse>(`/notifications/jobs${suffix ? `?${suffix}` : ''}`);
   },
 
+  /** 发送测试消息：未配置渠道会返回 503，不会排队也不会假装已发送 */
+  sendTestNotification: () =>
+    request<{ job: { id: string; status: string; fireAt: string }; provider: ProviderStatusDto; note: string }>(
+      '/notifications/test',
+      { method: 'POST', body: {} },
+    ),
+
+  /** 查询测试消息的真实结果（轮询用） */
+  testNotificationStatus: (jobId: string) =>
+    request<{
+      job: {
+        id: string;
+        status: string;
+        failureKind: string | null;
+        attempts: number;
+        maxAttempts: number;
+        lastError: string | null;
+        fireAt: string;
+        sentAt: string | null;
+      };
+      attempts: { attemptedAt: string; success: boolean; error: string | null }[];
+    }>(`/notifications/test/${jobId}`),
+
   events: {
     list: (range: { from?: string; to?: string } = {}) => {
       const query = new URLSearchParams();
