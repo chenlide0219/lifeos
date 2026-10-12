@@ -229,9 +229,32 @@ export function startWechatListener(): () => Promise<void> {
     });
 
   const running = (async () => {
+    // 心跳：接收循环本身没有日志，出问题时无法从日志判断"到底在不在轮询"。
+    // 每 5 分钟打一条摘要，便于真机排查（默认关闭以外的细节不打印，避免刷屏）。
+    const HEARTBEAT_MS = 5 * 60_000;
+    let lastHeartbeat = 0;
+    let rounds = 0;
+    let insertedTotal = 0;
+
     while (!controller.signal.aborted) {
       try {
-        await pollWechatUpdates(controller.signal);
+        const outcome = await pollWechatUpdates(controller.signal);
+        rounds += 1;
+        insertedTotal += outcome.inserted;
+        if (!outcome.bound) {
+          if (Date.now() - lastHeartbeat > HEARTBEAT_MS) {
+            lastHeartbeat = Date.now();
+            console.log('[worker] 微信接收：尚未绑定，未轮询');
+          }
+        } else if (Date.now() - lastHeartbeat > HEARTBEAT_MS) {
+          lastHeartbeat = Date.now();
+          console.log(
+            `[worker] 微信接收心跳：轮询 ${rounds} 次，本轮新入站 ${insertedTotal} 条` +
+              (outcome.upstreamError ? `，上游提示：${outcome.upstreamError}` : ''),
+          );
+          rounds = 0;
+          insertedTotal = 0;
+        }
       } catch {
         if (!controller.signal.aborted) {
           await updateWechatState((s) => {
