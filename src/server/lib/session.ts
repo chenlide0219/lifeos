@@ -2,14 +2,27 @@ import crypto from 'node:crypto';
 import { and, eq, gt, lt } from 'drizzle-orm';
 import { config } from '../config';
 import { db } from '../db/client';
-import { adminUsers, sessions } from '../db/schema';
+import { sessions, users } from '../db/schema';
 
 export const SESSION_COOKIE = 'lifeos_session';
 
 export type SessionUser = {
   id: number;
   username: string;
+  isAdmin: boolean;
+  /** 为真时除改密相关端点外的接口一律拒绝（见 middleware/auth.ts） */
+  mustChangePassword: boolean;
 };
+
+/** 对外暴露的账号字段：绝不包含 password_hash 或任何凭据材料 */
+export function toPublicUser(user: SessionUser) {
+  return {
+    id: user.id,
+    username: user.username,
+    isAdmin: user.isAdmin,
+    mustChangePassword: user.mustChangePassword,
+  };
+}
 
 function generateToken(): string {
   return crypto.randomBytes(32).toString('base64url');
@@ -42,16 +55,30 @@ export async function resolveSession(token: string): Promise<SessionUser | null>
   const [row] = await db
     .select({
       sessionId: sessions.id,
-      userId: adminUsers.id,
-      username: adminUsers.username,
+      userId: users.id,
+      username: users.username,
+      isAdmin: users.isAdmin,
+      mustChangePassword: users.mustChangePassword,
+      disabledAt: users.disabledAt,
       expiresAt: sessions.expiresAt,
     })
     .from(sessions)
-    .innerJoin(adminUsers, eq(sessions.userId, adminUsers.id))
+    .innerJoin(users, eq(sessions.userId, users.id))
     .where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, new Date())))
     .limit(1);
 
   if (!row) return null;
+
+  /**
+   * 被禁用的账号立即失效，并顺手销毁该会话。
+   *
+   * 只在"创建会话时"拦禁用是不够的：禁用发生时旧 Cookie 仍在有效期内，
+   * 不在这里判断就等于禁用不生效。同时删掉会话行，避免每次请求都重复拒绝。
+   */
+  if (row.disabledAt) {
+    await db.delete(sessions).where(eq(sessions.id, row.sessionId));
+    return null;
+  }
 
   // 活跃会话滑动续期，失败不影响本次请求
   void db
@@ -60,7 +87,12 @@ export async function resolveSession(token: string): Promise<SessionUser | null>
     .where(eq(sessions.id, row.sessionId))
     .catch(() => undefined);
 
-  return { id: row.userId, username: row.username };
+  return {
+    id: row.userId,
+    username: row.username,
+    isAdmin: row.isAdmin,
+    mustChangePassword: row.mustChangePassword,
+  };
 }
 
 export async function destroySession(token: string): Promise<void> {

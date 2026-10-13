@@ -19,7 +19,9 @@ export function LoginPage() {
     );
   }
 
-  if (user) return <Navigate to="/" replace />;
+  // 首次登录（或密码被管理员重置后）必须先改密，直接送到改密页，
+  // 而不是先进主界面再被守卫弹回来
+  if (user) return <Navigate to={user.mustChangePassword ? '/change-password' : '/'} replace />;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -88,7 +90,7 @@ export function LoginPage() {
         </form>
 
         <p className="mt-5 text-center text-xs text-muted">
-          仅供本人使用 · 无注册入口 · 忘记密码需在服务器执行重置命令
+          账号由管理员创建 · 无注册入口 · 忘记密码请联系管理员重置
         </p>
       </div>
     </div>

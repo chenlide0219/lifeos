@@ -93,7 +93,7 @@ PSQL='sudo -n -u postgres psql -d lifeos -tA'
 # 表数量断言改为"必需表清单 + 下限"。
 # 原先硬编码 `= 14`，V1.1 新增三张 wechat_* 表后必然误报
 # （自检本应发现结构缺失，而不是因为**新增**表而失败）。
-REQUIRED_TABLES='admin_users audit_logs csv_import_batches events expected_bills notification_attempts notification_jobs notification_rules payments sessions settings subscription_price_history subscriptions tasks wechat_inbox wechat_operations wechat_outbox'
+REQUIRED_TABLES='users audit_logs csv_import_batches events expected_bills notification_attempts notification_jobs notification_rules payments sessions settings subscription_price_history subscriptions tasks wechat_inbox wechat_operations wechat_outbox'
 tables="$($PSQL -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null || echo '?')"
 missing_tables=''
 for t in $REQUIRED_TABLES; do
@@ -113,11 +113,36 @@ fi
 op_uq="$($PSQL -c "SELECT 1 FROM pg_indexes WHERE indexname='wechat_operations_active_uq';" 2>/dev/null || echo '')"
 [ "$op_uq" = "1" ] && ok 'wechat_operations 活动草稿唯一索引存在' || bad '缺少 wechat_operations_active_uq（同时最多一个草稿失去数据库保证）'
 
-admins="$($PSQL -c 'SELECT count(*) FROM admin_users;' 2>/dev/null || echo '?')"
-[ "$admins" = "1" ] && ok '管理员数量为 1（未新增、未重建）' || bad "管理员数量异常：$admins"
+# 多用户改造后，账号**数量**不再是不变量（可以有很多个），
+# 但"至少有一个启用中的管理员"仍然是硬性要求：否则没有任何人能再管理账号。
+user_count="$($PSQL -c 'SELECT count(*) FROM users;' 2>/dev/null || echo '?')"
+enabled_admins="$($PSQL -c 'SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL;' 2>/dev/null || echo '?')"
+if [ "$user_count" = '?' ]; then
+  bad '无法读取 users 表（迁移未应用？）'
+elif [ "$user_count" -lt 1 ] 2>/dev/null; then
+  bad "账号数量为 $user_count，至少应有 1 个"
+elif [ "$enabled_admins" -lt 1 ] 2>/dev/null; then
+  bad '没有任何启用中的管理员：账号管理将无人可用'
+else
+  ok "账号 $user_count 个，其中启用中的管理员 $enabled_admins 个"
+fi
 
+# 反向断言：单管理员唯一索引必须已删除。
+# 若它还在（例如误用 drizzle-kit 默认输出重建过表），第二个账号根本插不进去。
 singleton="$($PSQL -c "SELECT count(*) FROM pg_indexes WHERE indexname='admin_users_singleton_uq';" 2>/dev/null || echo '?')"
-[ "$singleton" = "1" ] && ok '单管理员唯一索引存在' || bad '缺少单管理员唯一索引'
+[ "$singleton" = '0' ] && ok '单管理员唯一索引已解除（可创建多账号）' || bad '单管理员唯一索引仍存在：第二个账号无法创建'
+
+if [ "$($PSQL -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='admin_users';" 2>/dev/null || echo '?')" = '0' ]; then
+  ok '旧表 admin_users 已不存在（已重命名为 users）'
+else
+  bad 'admin_users 表仍然存在：users 迁移未生效或未完成'
+fi
+
+# 强制改密与禁用链路依赖这四列，逐列检查以免"迁移看起来成功但缺列"
+for col in is_admin disabled_at must_change_password password_changed_at; do
+  has="$($PSQL -c "SELECT count(*) FROM information_schema.columns WHERE table_name='users' AND column_name='$col';" 2>/dev/null || echo '?')"
+  [ "$has" = '1' ] && ok "users.$col 存在" || bad "users 缺少 $col 列"
+done
 
 fk="$($PSQL -c "SELECT count(*) FROM information_schema.columns WHERE table_name='notification_jobs' AND column_name='failure_kind';" 2>/dev/null || echo '?')"
 [ "$fk" = "1" ] && ok 'notification_jobs.failure_kind 存在' || bad '缺少 failure_kind 列'

@@ -13,7 +13,7 @@
     "build:web": "vite build",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/scripts/migrate.ts",
-    "create-admin": "tsx src/scripts/create-admin.ts",
+    "create-user": "tsx src/scripts/create-user.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx tests/run.ts",
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",

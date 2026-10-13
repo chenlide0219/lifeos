@@ -14,7 +14,7 @@ requireTestDatabase();
 
 const { db, pool } = await import('../../src/server/db/client');
 const { createApp } = await import('../../src/server/app');
-const { adminUsers, notificationJobs, subscriptionPriceHistory, subscriptions } = await import(
+const { users, notificationJobs, subscriptionPriceHistory, subscriptions } = await import(
   '../../src/server/db/schema'
 );
 const { hashPassword } = await import('../../src/server/lib/password');
@@ -32,8 +32,8 @@ function request(path: string, init: RequestInit = {}): Promise<Response> {
 const json = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 
 before(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
-  await db.insert(adminUsers).values({ username: 'subremind', passwordHash: await hashPassword(PASSWORD) });
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.insert(users).values({ username: 'subremind', passwordHash: await hashPassword(PASSWORD) });
   const res = await app.request('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -52,7 +52,7 @@ beforeEach(async () => {
 });
 
 after(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
   await pool.end();
 });
 

@@ -33,9 +33,23 @@ export async function dummyVerify(password: string): Promise<void> {
   }
 }
 
-export function assertPasswordStrength(password: string): void {
-  if (password.length < 12) throw new Error('密码至少需要 12 个字符');
-  if (password.length > 256) throw new Error('密码过长');
+/**
+ * 密码强度检查（非抛出形式）。
+ *
+ * 单独提供"返回原因"的版本，是因为两种场景需要不同处理：
+ * - **用户自助改密**必须硬性拒绝弱密码 → 用 assertPasswordStrength；
+ * - **管理员创建/重置账号**时输入的是一次性初始密码，用户首次登录必须改密，
+ *   此时只提示不拒绝（否则无法按要求设置指定的初始密码）→ 用本函数取原因再警告。
+ */
+export function checkPasswordStrength(password: string): string | null {
+  if (password.length < 12) return '密码至少需要 12 个字符';
+  if (password.length > 256) return '密码过长';
   const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
-  if (classes < 3) throw new Error('密码需至少包含小写字母、大写字母、数字、符号中的三类');
+  if (classes < 3) return '密码需至少包含小写字母、大写字母、数字、符号中的三类';
+  return null;
+}
+
+export function assertPasswordStrength(password: string): void {
+  const reason = checkPasswordStrength(password);
+  if (reason) throw new Error(reason);
 }

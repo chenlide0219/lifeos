@@ -11,6 +11,10 @@ export type ApiError = {
 export type SessionUserDto = {
   id: number;
   username: string;
+  /** 能否管理账号（新增/禁用/重置）。不代表能看别人的业务数据——数据一律按用户隔离 */
+  isAdmin: boolean;
+  /** 为真时前端必须先把用户送到改密页；后端也会拒绝其它接口（403 password_change_required） */
+  mustChangePassword: boolean;
 };
 
 export type AuthResponse = {

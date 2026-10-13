@@ -142,9 +142,10 @@ fi
 log "恢复完成，无 SQL 错误"
 
 # ── 5. 结构与必要数据校验 ──────────────────────────────────────
-REQUIRED_TABLES="admin_users audit_logs csv_import_batches events expected_bills
+REQUIRED_TABLES="users audit_logs csv_import_batches events expected_bills
 notification_attempts notification_jobs notification_rules payments sessions
-settings subscription_price_history subscriptions tasks"
+settings subscription_price_history subscriptions tasks
+wechat_inbox wechat_operations wechat_outbox"
 
 missing=""
 for t in $REQUIRED_TABLES; do
@@ -166,16 +167,23 @@ if [ "${migration_count:-0}" -lt 1 ]; then
 fi
 log "迁移记录：$migration_count 条"
 
-# 必要数据：单管理员是产品不变量
-admin_count="$(psql_admin -tA -v ON_ERROR_STOP=1 -d "$TEST_DB" -c "SELECT count(*) FROM admin_users;")"
-case "$admin_count" in
-  1) log "管理员数量校验通过：1" ;;
-  0) err "恢复后管理员数量为 0；生产备份应恰好包含 1 个管理员，请核对备份来源"; exit 5 ;;
-  *) err "恢复后管理员数量为 $admin_count，违反单管理员不变量"; exit 5 ;;
-esac
+# 必要数据：账号数量不是不变量（可以是多个），但必须能登录、且有人能管理账号。
+user_count="$(psql_admin -tA -v ON_ERROR_STOP=1 -d "$TEST_DB" -c "SELECT count(*) FROM users;")"
+if [ "${user_count:-0}" -lt 1 ]; then
+  err "恢复后 users 表为空；生产备份至少应包含 1 个账号，请核对备份来源"
+  exit 5
+fi
+enabled_admins="$(psql_admin -tA -v ON_ERROR_STOP=1 -d "$TEST_DB" \
+  -c "SELECT count(*) FROM users WHERE is_admin AND disabled_at IS NULL;")"
+if [ "${enabled_admins:-0}" -lt 1 ]; then
+  err "恢复后没有任何启用中的管理员（is_admin 且未禁用）：账号管理将无人可用"
+  exit 5
+fi
+log "账号校验通过：$user_count 个账号，其中启用中的管理员 $enabled_admins 个"
 
-setting_count="$(psql_admin -tA -v ON_ERROR_STOP=1 -d "$TEST_DB" -c "SELECT count(*) FROM settings;")"
-[ "${setting_count:-0}" -ge 1 ] || { err "恢复后 settings 表为空，默认设置缺失"; exit 5; }
-log "默认设置校验通过：$setting_count 条"
+# settings 表只保留"结构存在"这一层校验（已由 REQUIRED_TABLES 覆盖）。
+# 原先还断言"恢复后 settings 不为空"，隐含依赖 migrate.ts 播种的默认设置；
+# 那三个种子键（theme/timezone/calendar.defaultView）从来没有任何代码读取过，
+# 属于死数据且会把"全局表"误当成"用户偏好表"，已停止播种，因此该断言随之删除。
 
 log "通过：备份可完整恢复，结构、迁移记录与必要数据均已校验"

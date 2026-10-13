@@ -14,7 +14,7 @@ requireTestDatabase();
 
 const { db, pool } = await import('../../src/server/db/client');
 const { createApp } = await import('../../src/server/app');
-const { adminUsers } = await import('../../src/server/db/schema');
+const { users } = await import('../../src/server/db/schema');
 const { hashPassword } = await import('../../src/server/lib/password');
 const { toCsv } = await import('../../src/server/lib/csv');
 
@@ -30,8 +30,8 @@ function request(path: string, init: RequestInit = {}): Promise<Response> {
 }
 
 before(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
-  await db.insert(adminUsers).values({ username: 'export-test', passwordHash: await hashPassword(PASSWORD) });
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.insert(users).values({ username: 'export-test', passwordHash: await hashPassword(PASSWORD) });
   const res = await app.request('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -50,7 +50,7 @@ beforeEach(async () => {
 });
 
 after(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
   await pool.end();
 });
 
@@ -146,13 +146,13 @@ describe('导出绝不含凭据材料', () => {
   it('JSON 导出中不出现密码哈希与会话令牌字段', async () => {
     // 取出真实的密码哈希值，用它来验证"导出里确实没有这个值"
     const hashRow = (await db.execute(
-      sql`SELECT password_hash FROM admin_users LIMIT 1`,
+      sql`SELECT password_hash FROM users LIMIT 1`,
     )) as unknown as { rows: { password_hash: string }[] };
     const realHash = hashRow.rows[0]!.password_hash;
 
     await db.execute(sql`
       INSERT INTO sessions (user_id, token_hash, expires_at)
-      VALUES ((SELECT id FROM admin_users LIMIT 1), 'super-secret-token-hash', now() + interval '1 day')
+      VALUES ((SELECT id FROM users LIMIT 1), 'super-secret-token-hash', now() + interval '1 day')
     `);
 
     const raw = await (await request('/api/export/data.json')).text();
@@ -163,11 +163,11 @@ describe('导出绝不含凭据材料', () => {
     assert.doesNotMatch(raw, /super-secret-token-hash/, '不得导出会话令牌');
 
     // 数据区里不应存在这些表
-    assert.ok(!('adminUsers' in body.data), '数据区不应包含管理员表');
+    assert.ok(!('users' in body.data), '数据区不应包含管理员表');
     assert.ok(!('sessions' in body.data), '数据区不应包含会话表');
 
     // 同时把"排除了什么"明确写进导出文件，避免使用者误以为这就是全部
-    assert.ok(body.excluded.includes('admin_users.password_hash'));
+    assert.ok(body.excluded.includes('users.password_hash'));
     assert.ok(body.excluded.includes('sessions'));
   });
 

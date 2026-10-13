@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { and, eq, ne } from 'drizzle-orm';
 import { db } from '../db/client';
-import { adminUsers, auditLogs, sessions } from '../db/schema';
+import { users, auditLogs, sessions } from '../db/schema';
 import { assertPasswordStrength, dummyVerify, hashPassword, verifyPassword } from '../lib/password';
 import { rateLimit, resetRateLimit } from '../lib/ratelimit';
 import {
@@ -11,6 +11,7 @@ import {
   destroySession,
   hashToken,
   sessionCookieOptions,
+  toPublicUser,
 } from '../lib/session';
 import { clientIp, requireAuth, type AppEnv } from '../middleware/auth';
 
@@ -55,9 +56,16 @@ authRoutes.post('/login', async (c) => {
   }
 
   const [user] = await db
-    .select({ id: adminUsers.id, username: adminUsers.username, passwordHash: adminUsers.passwordHash })
-    .from(adminUsers)
-    .where(eq(adminUsers.username, username))
+    .select({
+      id: users.id,
+      username: users.username,
+      passwordHash: users.passwordHash,
+      isAdmin: users.isAdmin,
+      mustChangePassword: users.mustChangePassword,
+      disabledAt: users.disabledAt,
+    })
+    .from(users)
+    .where(eq(users.username, username))
     .limit(1);
 
   if (!user) {
@@ -70,6 +78,19 @@ authRoutes.post('/login', async (c) => {
   const valid = await verifyPassword(user.passwordHash, password);
   if (!valid) {
     await recordAudit(user.id, 'login.failed', { username, reason: 'bad_password' }, ip);
+    return c.json({ error: 'invalid_credentials', message: '用户名或密码不正确' }, 401);
+  }
+
+  /**
+   * 禁用判定放在**密码校验之后**：
+   *
+   * 放在之前会让"账号是否存在/是否被禁用"通过响应时间泄露给未持有密码的人。
+   * 放在之后，只有已经知道正确密码的人才会走到这里，而返回的仍然是
+   * 与密码错误**完全相同**的措辞与状态码，因此对外不区分"禁用"与"密码错"；
+   * 真实原因只写进审计日志，供管理员排查。
+   */
+  if (user.disabledAt) {
+    await recordAudit(user.id, 'login.disabled', { username }, ip);
     return c.json({ error: 'invalid_credentials', message: '用户名或密码不正确' }, 401);
   }
 
@@ -86,7 +107,7 @@ authRoutes.post('/login', async (c) => {
   resetRateLimit(`login:user:${username.toLowerCase()}`);
   await recordAudit(user.id, 'login.success', null, ip);
 
-  return c.json({ user: { id: user.id, username: user.username } });
+  return c.json({ user: toPublicUser(user) });
 });
 
 authRoutes.post('/logout', async (c) => {
@@ -99,8 +120,7 @@ authRoutes.post('/logout', async (c) => {
 });
 
 authRoutes.get('/me', requireAuth, (c) => {
-  const user = c.get('user');
-  return c.json({ user });
+  return c.json({ user: toPublicUser(c.get('user')) });
 });
 
 /**
@@ -141,9 +161,9 @@ authRoutes.post('/password', requireAuth, async (c) => {
   }
 
   const [row] = await db
-    .select({ passwordHash: adminUsers.passwordHash })
-    .from(adminUsers)
-    .where(eq(adminUsers.id, user.id))
+    .select({ passwordHash: users.passwordHash })
+    .from(users)
+    .where(eq(users.id, user.id))
     .limit(1);
 
   if (!row) {
@@ -158,9 +178,15 @@ authRoutes.post('/password', requireAuth, async (c) => {
 
   const passwordHash = await hashPassword(newPassword);
   await db
-    .update(adminUsers)
-    .set({ passwordHash, updatedAt: new Date() })
-    .where(eq(adminUsers.id, user.id));
+    .update(users)
+    .set({
+      passwordHash,
+      // 改密成功即解除强制改密：这也是管理端"重置密码"被解除的唯一出口
+      mustChangePassword: false,
+      passwordChangedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, user.id));
 
   // 其余设备下线，当前会话保留
   const token = getCookie(c, SESSION_COOKIE);

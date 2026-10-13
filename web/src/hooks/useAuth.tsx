@@ -7,6 +7,8 @@ type AuthState = {
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** 重新拉取当前账号状态（改密成功后必须调用，否则强制改密标记不会解除） */
+  refresh: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -49,7 +51,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const value = useMemo<AuthState>(() => ({ user, loading, login, logout }), [user, loading, login, logout]);
+  const refresh = useCallback(async () => {
+    try {
+      const res = await api.me();
+      setUser(res.user);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setUser(null);
+        return;
+      }
+      throw err;
+    }
+  }, []);
+
+  const value = useMemo<AuthState>(
+    () => ({ user, loading, login, logout, refresh }),
+    [user, loading, login, logout, refresh],
+  );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

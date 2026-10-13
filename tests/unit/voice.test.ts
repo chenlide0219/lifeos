@@ -22,7 +22,7 @@ process.env.DEEPSEEK_BASE_URL = 'https://deepseek.test.invalid/anthropic';
 
 const { db, pool } = await import('../../src/server/db/client');
 const { createApp } = await import('../../src/server/app');
-const { adminUsers } = await import('../../src/server/db/schema');
+const { users } = await import('../../src/server/db/schema');
 const { hashPassword } = await import('../../src/server/lib/password');
 const { extractJson, normalizeDraft, formatWithOffset } = await import('../../src/server/lib/ai/deepseek');
 
@@ -59,8 +59,8 @@ function anthropicStyle(body: Record<string, unknown>): Response {
 }
 
 before(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
-  await db.insert(adminUsers).values({ username: 'voice-test', passwordHash: await hashPassword(TEST_PASSWORD) });
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.insert(users).values({ username: 'voice-test', passwordHash: await hashPassword(TEST_PASSWORD) });
   const res = await app.request('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -87,7 +87,7 @@ afterEach(() => {
 });
 
 after(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
   await pool.end();
 });
 

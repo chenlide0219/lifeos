@@ -179,18 +179,27 @@ sudo systemctl restart lifeos-api
 sudo bash /opt/lifeos/deploy/backup.sh
 sudo bash /opt/lifeos/deploy/restore-test.sh          # 恢复演练，只碰 _test 库
 
-# 管理员维护（单管理员：不会新增第二个账号）
+# 账号维护（不开放注册：账号只能由管理界面或本命令创建）
 cd /opt/lifeos
-npm run create-admin -- <用户名>                       # 首次初始化
-npm run create-admin -- <用户名> --update              # 重置密码
-npm run create-admin -- <新用户名> --rename            # 重命名（非新增）
+npm run create-user -- --list                                  # 列出账号、权限与状态
+npm run create-user -- <用户名> --password-stdin [--admin]      # 新建（首个账号自动成为管理员）
+npm run create-user -- <用户名> --update [新密码]                # 重置密码并强制其下次登录改密
+npm run create-user -- <新用户名> --rename <旧用户名>            # 重命名（不是新增）
+npm run create-user -- <用户名> --disable                      # 禁用（立即撤销其全部会话）
+npm run create-user -- <用户名> --enable                       # 恢复
 ```
+
+初始密码不要写在命令行上（`ps` 与 shell 历史都会留下它），优先用 `--password-stdin`。
+由管理员设置或生成的初始密码一律标记为**必须首次登录改密**，在改密之前该账号
+无法使用任何业务功能（后端返回 403 `password_change_required`，不只是前端跳转）。
 
 ## 关键约定
 
 - 时间型数据按 UTC 存 `timestamptz`；日期型数据（全天待办、扣费日）存 `date`，不当作 UTC 午夜。
 - 金额一律 `numeric`，禁止二进制浮点。
-- **单管理员是不变量**：CLI 拒绝创建第二个账号，数据库还有常量表达式唯一索引兜底。
+- **不开放注册**：账号只能由管理界面或 `create-user` 命令创建；没有注册入口与自助找回，
+  忘记密码由管理员重置。多用户改造后**没有**"单管理员"约束了，但仍然保留两条硬性要求：
+  新建账号默认不是管理员（`is_admin` 默认 false），且系统必须始终至少有一个启用中的管理员。
 - **预计账单永不自动转为已付款**，必须人工确认。
 - **通知结果分三态**：明确可重试才重试；明确拒绝/需人工介入直接终止；
   **无法确认是否送达（HTTP 200 但无可靠业务回执、超时、发送中中断）一律不自动重发**，

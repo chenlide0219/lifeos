@@ -16,7 +16,7 @@ requireTestDatabase();
 
 const { db, pool } = await import('../../src/server/db/client');
 const { createApp } = await import('../../src/server/app');
-const { adminUsers } = await import('../../src/server/db/schema');
+const { users } = await import('../../src/server/db/schema');
 const { hashPassword } = await import('../../src/server/lib/password');
 
 const app = createApp();
@@ -40,8 +40,8 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 before(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
-  await db.insert(adminUsers).values({
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.insert(users).values({
     username: 'api-test-admin',
     passwordHash: await hashPassword(TEST_PASSWORD),
   });
@@ -65,7 +65,7 @@ beforeEach(async () => {
 });
 
 after(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
   await pool.end();
 });
 

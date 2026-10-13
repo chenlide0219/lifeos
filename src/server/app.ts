@@ -9,6 +9,7 @@ import { Hono, type Context } from 'hono';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { config } from './config';
+import { enforcePasswordRotation } from './middleware/auth';
 import { authRoutes } from './routes/auth';
 import { calendarRoutes } from './routes/calendar';
 import { csvRoutes } from './routes/csv-import';
@@ -52,6 +53,12 @@ export function createApp(): Hono {
     await next();
     applyNoStore(c);
   });
+
+  /**
+   * 强制改密闸门同样必须在路由**之前**注册（Hono 按注册顺序匹配）。
+   * 放在这里而不是各路由内：新增路由时默认受策略覆盖，不依赖"记得挂"。
+   */
+  api.use('*', enforcePasswordRotation);
 
   api.route('/health', healthRoutes);
   api.route('/auth', authRoutes);

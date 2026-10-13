@@ -26,21 +26,34 @@ import {
 
 /* ────────────────────────── 账户与会话 ────────────────────────── */
 
-export const adminUsers = pgTable(
-  'admin_users',
-  {
-    id: serial('id').primaryKey(),
-    username: varchar('username', { length: 64 }).notNull().unique(),
-    passwordHash: text('password_hash').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  () => [
-    // 单管理员是产品不变量（PRD 第 2 节：仅本人、不开放注册、不做多租户）。
-    // 用常量表达式唯一索引在数据库层强制"至多一行"，使任何代码路径都无法造出第二个管理员。
-    uniqueIndex('admin_users_singleton_uq').on(sql`(true)`),
-  ],
-);
+/**
+ * 账号表（原 `admin_users`，多用户改造后重命名为 `users`）。
+ *
+ * 单管理员曾是产品不变量，由常量表达式唯一索引在数据库层强制"至多一行"。
+ * 多用户上线后该索引已删除（见迁移 0003）：仍然**不开放注册**，账号只能由
+ * 管理界面或 CLI 显式创建，但允许多行。
+ *
+ * 保留的仍然是"安全的默认值"：
+ * - `is_admin` 默认 false —— 新建账号默认没有账号管理权限，必须显式授权；
+ * - `must_change_password` 默认 false —— 只有被管理员创建或重置过密码的账号才置为 true。
+ */
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  username: varchar('username', { length: 64 }).notNull().unique(),
+  passwordHash: text('password_hash').notNull(),
+  /** 能否管理账号（新增/禁用/重置）。不是"能否看别人数据"——数据一律按用户隔离 */
+  isAdmin: boolean('is_admin').notNull().default(false),
+  /** 禁用时刻；非空即禁止登录，且历史会话在禁用时被立即清除 */
+  disabledAt: timestamp('disabled_at', { withTimezone: true }),
+  /**
+   * 必须改密。为真时除「查自己是谁」「改密」「登出」外的接口一律拒绝，
+   * 不能只靠前端跳转——否则一个直接调 API 的客户端就绕过了强制改密。
+   */
+  mustChangePassword: boolean('must_change_password').notNull().default(false),
+  passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const sessions = pgTable(
   'sessions',
@@ -48,7 +61,7 @@ export const sessions = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     userId: integer('user_id')
       .notNull()
-      .references(() => adminUsers.id, { onDelete: 'cascade' }),
+      .references(() => users.id, { onDelete: 'cascade' }),
     /** 仅存 token 的 SHA-256，明文只存在于浏览器 Cookie */
     tokenHash: text('token_hash').notNull().unique(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
@@ -65,7 +78,7 @@ export const auditLogs = pgTable(
   'audit_logs',
   {
     id: serial('id').primaryKey(),
-    userId: integer('user_id').references(() => adminUsers.id, { onDelete: 'set null' }),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
     action: varchar('action', { length: 64 }).notNull(),
     detail: jsonb('detail'),
     ip: text('ip'),
@@ -464,7 +477,17 @@ export const wechatOutbox = pgTable(
 
 /* ────────────────────────── 设置 ────────────────────────── */
 
-
+/**
+ * **全局**键值设置。
+ *
+ * ⚠️ 多用户下的取舍：这个表是全库共享的，**不得**用来存"每个用户各自的偏好"。
+ * 曾经误把 `theme` / `timezone` / `calendar.defaultView` 播种在这里，但那三个键
+ * 从来没有被任何代码读取过（主题实际存在前端 localStorage，时区来自 env `TZ`），
+ * 属于会误导后来者的死数据，已在多用户改造中停止播种。
+ *
+ * 用户级配置的正确位置是 `users` 行上的列，或带 `user_id` 的专属表；
+ * 本表只保留真正全局的东西（例如后续可能出现的系统级开关）。
+ */
 export const settings = pgTable('settings', {
   key: varchar('key', { length: 64 }).primaryKey(),
   value: jsonb('value').notNull(),

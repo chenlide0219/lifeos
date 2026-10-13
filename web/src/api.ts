@@ -51,6 +51,19 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!response.ok) {
     const data = payload as { message?: string; error?: string } | null;
+
+    /**
+     * 强制改密是安全策略，不是普通业务错误。
+     *
+     * 拿到这个 403 说明本地状态过期了（例如在另一台设备上被重置了密码），
+     * 此时继续停留在业务页只会反复弹同一条错误，直接送回改密页。
+     */
+    if (response.status === 403 && data?.error === 'password_change_required') {
+      if (typeof window !== 'undefined' && window.location.pathname !== '/change-password') {
+        window.location.replace('/change-password');
+      }
+    }
+
     throw new ApiError(
       response.status,
       data?.message || `请求失败（HTTP ${response.status}）`,

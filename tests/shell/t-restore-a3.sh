@@ -26,10 +26,10 @@ if [ -z "$TEST_URL" ]; then
   exit 1
 fi
 
-echo "→ 准备一份含 1 个管理员的合法备份（不接触生产库）"
+echo "→ 准备一份含 1 个启用中管理员的合法备份（不接触生产库）"
 psql "$TEST_URL" -q -v ON_ERROR_STOP=1 <<'SQL'
-TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE;
-INSERT INTO admin_users (username, password_hash) VALUES ('restore-probe', 'x');
+TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE;
+INSERT INTO users (username, password_hash, is_admin) VALUES ('restore-probe', 'x', true);
 INSERT INTO settings (key, value) VALUES ('restore.probe', '{"v":1}'::jsonb)
   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 SQL

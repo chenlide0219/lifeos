@@ -6,7 +6,7 @@
  *   GET /api/export/data.json           完整业务数据（用于迁移与自留备份）
  *
  * 安全约束（PRD FR-08 明确要求）：
- *   - **绝不导出任何凭据材料**：`admin_users.password_hash`、`sessions.token_hash`
+ *   - **绝不导出任何凭据材料**：`users.password_hash`、`sessions.token_hash`
  *     一律排除。备份文件常被放到邮箱、网盘或异地，凭据哈希一旦流出即等于长期风险。
  *   - 导出内容只包含业务数据本身。
  */
@@ -121,7 +121,7 @@ exportRoutes.get('/payments.csv', requireAuth, async (c) => {
 /**
  * 完整业务数据 JSON。
  *
- * 刻意排除：`admin_users.password_hash`、`sessions` 全部、
+ * 刻意排除：`users.password_hash`、`sessions` 全部、
  * 以及任何密钥类环境变量。导出文件经常被搬来搬去，凭据材料不能随之流动。
  */
 exportRoutes.get('/data.json', requireAuth, async (c) => {
@@ -173,7 +173,7 @@ exportRoutes.get('/data.json', requireAuth, async (c) => {
       settings: settingRows.length,
     },
     // 明确声明未包含的内容，避免使用者误以为"这就是全部"
-    excluded: ['admin_users.password_hash', 'sessions', 'audit_logs', 'notification_attempts'],
+    excluded: ['users.password_hash', 'sessions', 'audit_logs', 'notification_attempts'],
     exclusionReason: '凭据材料与会话令牌不随导出文件流动；审计与发送尝试按运维日志处理',
     data: {
       events: eventRows,
@@ -201,7 +201,7 @@ exportRoutes.get('/manifest', requireAuth, async (c) =>
       { path: '/api/export/payments.csv', content: '实际付款（含退款与汇率快照）' },
       { path: '/api/export/data.json', content: '完整业务数据 JSON' },
     ],
-    excluded: ['admin_users.password_hash', 'sessions', 'audit_logs', 'notification_attempts'],
+    excluded: ['users.password_hash', 'sessions', 'audit_logs', 'notification_attempts'],
     csvNotes: [
       'UTF-8 带 BOM，Excel 打开中文不乱码',
       '以 = + - @ 开头的单元格会被加上前导单引号，防止被当作公式执行',

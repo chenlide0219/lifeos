@@ -20,7 +20,68 @@ export function clientIp(c: Context): string {
   return 'unknown';
 }
 
+/**
+ * 强制改密期间仍然必须可用的端点。
+ *
+ * 必须包含 `/auth/me`：前端要靠它判断"我是否处于必须改密状态"；
+ * 若把它也拒掉，前端只会看到一片 403，无法给出正确的引导。
+ */
+const PASSWORD_ROTATION_ALLOWLIST = new Set([
+  '/health',
+  '/auth/login',
+  '/auth/logout',
+  '/auth/me',
+  '/auth/password',
+]);
+
+/** 把挂载前缀去掉，使同一份清单在 `/api/x` 与 `/x` 两种挂载方式下都成立 */
+function normalizedPath(c: Context): string {
+  return c.req.path.replace(/^\/api(?=\/|$)/, '');
+}
+
+/**
+ * 强制改密闸门（全局中间件，注册在**路由之前**）。
+ *
+ * 为什么放在全局而不是逐个路由：
+ * `requireAuth` 是每个路由自己挂的，将来新增路由时任何人漏挂都不会有明显症状。
+ * 强制改密是安全策略，"漏挂"等于策略被静默绕过，因此必须在框架层统一执行，
+ * 只对少数必需端点例外（白名单），新增路由默认被覆盖。
+ *
+ * 这里解析出的用户写回上下文，`requireAuth` 会复用，避免同一请求查两次库。
+ */
+export const enforcePasswordRotation: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const token = getCookie(c, SESSION_COOKIE);
+  if (!token) {
+    await next();
+    return;
+  }
+
+  const user = await resolveSession(token);
+  if (!user) {
+    // 未登录/会话失效/账号被禁用：交给 requireAuth 统一给出 401，避免两处措辞不一致
+    await next();
+    return;
+  }
+
+  c.set('user', user);
+
+  if (user.mustChangePassword && !PASSWORD_ROTATION_ALLOWLIST.has(normalizedPath(c))) {
+    return c.json(
+      { error: 'password_change_required', message: '首次登录（或密码被重置）后必须先设置新密码' },
+      403,
+    );
+  }
+
+  await next();
+};
+
 export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
+  // 上层中间件已解析并写入用户时直接复用，避免重复查询会话表
+  if (c.get('user')) {
+    await next();
+    return;
+  }
+
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) {
     return c.json({ error: 'unauthorized', message: '请先登录' }, 401);

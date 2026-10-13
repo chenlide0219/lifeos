@@ -13,7 +13,7 @@ requireTestDatabase();
 
 const { db, pool } = await import('../../src/server/db/client');
 const { createApp } = await import('../../src/server/app');
-const { adminUsers } = await import('../../src/server/db/schema');
+const { users } = await import('../../src/server/db/schema');
 const { hashPassword } = await import('../../src/server/lib/password');
 
 const app = createApp();
@@ -45,8 +45,8 @@ function nextMonth(): string {
 }
 
 before(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
-  await db.insert(adminUsers).values({ username: 'subsum', passwordHash: await hashPassword(PASSWORD) });
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.insert(users).values({ username: 'subsum', passwordHash: await hashPassword(PASSWORD) });
   const res = await app.request('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -65,7 +65,7 @@ beforeEach(async () => {
 });
 
 after(async () => {
-  await db.execute(sql`TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE`);
+  await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
   await pool.end();
 });
 

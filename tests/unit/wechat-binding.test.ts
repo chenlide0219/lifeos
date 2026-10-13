@@ -28,8 +28,8 @@ const response = (body: unknown) => new Response(JSON.stringify(body), { status:
 
 before(async () => {
   await pool.query('DELETE FROM settings WHERE key=$1', [WECHAT_STATE_KEY]);
-  await pool.query('TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE');
-  await pool.query('INSERT INTO admin_users(username,password_hash) VALUES($1,$2)', ['wechat-test', await hashPassword('WeChat-Test-Pass-1!')]);
+  await pool.query('TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE');
+  await pool.query('INSERT INTO users(username,password_hash) VALUES($1,$2)', ['wechat-test', await hashPassword('WeChat-Test-Pass-1!')]);
   const login = await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'wechat-test', password: 'WeChat-Test-Pass-1!' }) });
   assert.equal(login.status, 200);
@@ -57,7 +57,7 @@ after(async () => {
   globalThis.fetch = originalFetch;
   await pool.query('DELETE FROM notification_jobs WHERE idempotency_key=$1', ['wechat-window-test-job']);
   await pool.query('DELETE FROM settings WHERE key=$1', [WECHAT_STATE_KEY]);
-  await pool.query('TRUNCATE admin_users, sessions, audit_logs RESTART IDENTITY CASCADE');
+  await pool.query('TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE');
   await pool.end();
 });
 function call(path: string, method = 'GET', body?: unknown) {

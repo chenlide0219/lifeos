@@ -93,7 +93,8 @@ export function Layout() {
           <div className="flex items-center justify-between gap-2 rounded-xl px-3 py-2">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">{user?.username}</p>
-              <p className="text-xs text-muted">管理员</p>
+              {/* 多用户后角色不再是恒定的"管理员"，必须按账号实际权限显示 */}
+              <p className="text-xs text-muted">{user?.isAdmin ? '管理员' : '普通用户'}</p>
             </div>
             <button
               type="button"
