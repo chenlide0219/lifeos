@@ -100,23 +100,25 @@ export function DashboardPage() {
         </div>
       ) : null}
 
-      <section className="mb-7 grid grid-cols-2 overflow-hidden rounded-2xl border border-line bg-surface sm:grid-cols-3" aria-label="今日概况">
-        <Link to="/todo" className="group flex items-center justify-between gap-2 border-b border-r border-line p-4 transition-colors hover:bg-canvas sm:border-b-0 sm:border-r sm:p-6">
-          <div><p className="text-xs text-muted">今日待办 · 含逾期</p><p className="mt-2 text-2xl sm:text-3xl font-semibold tracking-tight">{overview?.tasksDueTodayCount ?? '—'}<span className="ml-2 text-xs font-normal text-muted">项</span></p></div>
-          <IconTodo className="text-task" width={24} height={24} />
+      <section className="overview-notes mb-7 grid grid-cols-2 gap-3 sm:grid-cols-3" aria-label="今日概况">
+        <Link to="/todo" className="card relative flex items-center justify-between gap-2 p-4 transition-colors hover:bg-canvas sm:p-5">
+          <span aria-hidden="true" className="tape absolute -top-2.5 left-1/2 h-3.5 w-16 -translate-x-1/2 -rotate-2" />
+          <div><p className="text-xs text-muted">今日待办 · 含逾期</p><p className="stat-num mt-1 tabular-nums">{overview?.tasksDueTodayCount ?? '—'}<span className="ml-1.5 font-sans text-xs font-normal text-pencil">项</span></p></div>
+          <IconTodo className="shrink-0 text-task" width={22} height={22} />
         </Link>
-        <Link to="/subscriptions" className="flex items-center justify-between gap-2 border-b border-line p-4 transition-colors hover:bg-canvas sm:border-b-0 sm:border-r sm:p-6">
-          <div><p className="text-xs text-muted">管理中的订阅</p><p className="mt-2 text-2xl sm:text-3xl font-semibold tracking-tight">{summary?.subscriptions ?? '—'}<span className="ml-2 text-xs font-normal text-muted">项</span></p></div>
-          <IconSubscription className="text-subscription" width={24} height={24} />
+        <Link to="/subscriptions" className="card relative flex items-center justify-between gap-2 p-4 transition-colors hover:bg-canvas sm:p-5">
+          <span aria-hidden="true" className="tape tape-green absolute -top-2.5 -right-3 h-3.5 w-16 rotate-6" />
+          <div><p className="text-xs text-muted">管理中的订阅</p><p className="stat-num mt-1 tabular-nums">{summary?.subscriptions ?? '—'}<span className="ml-1.5 font-sans text-xs font-normal text-pencil">项</span></p></div>
+          <IconSubscription className="shrink-0 text-subscription" width={22} height={22} />
         </Link>
-        <Link to="/calendar" className="col-span-2 flex items-center justify-between p-4 transition-colors sm:col-span-1 hover:bg-canvas sm:p-6">
-          <div><p className="text-xs text-muted">留一点时间给生活</p><p className="mt-2 text-base font-medium">查看日历 <span aria-hidden="true">↗</span></p></div>
-          <IconCalendar className="text-event" width={24} height={24} />
+        <Link to="/calendar" className="card col-span-2 flex items-center justify-between gap-2 p-4 transition-colors hover:bg-canvas sm:col-span-1 sm:p-5">
+          <div><p className="text-xs text-muted">留一点时间给生活</p><p className="mt-1 text-base font-medium">翻开日历 <span aria-hidden="true">↗</span></p></div>
+          <IconCalendar className="shrink-0 text-event" width={22} height={22} />
         </Link>
       </section>
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <div>
-        <Card title="专注今天" action={<Link to="/todo" className="inline-flex min-h-11 items-center text-xs font-medium text-brand">全部待办 ↗</Link>} subtitle={overview ? `今天到期或已逾期 · ${overview.tasksDueTodayCount} 项` : undefined}>
+        <Card tape="left" ruled title="专注今天" action={<Link to="/todo" className="inline-flex min-h-11 items-center text-xs font-medium text-brand underline decoration-dotted underline-offset-4">全部待办 ↗</Link>} subtitle={overview ? `今天到期或已逾期 · ${overview.tasksDueTodayCount} 项` : undefined}>
           {!overview ? (
             <div className="flex items-center gap-2 py-6 text-sm text-muted">
               <Spinner /> 读取中…
@@ -124,15 +126,15 @@ export function DashboardPage() {
           ) : overview.tasksDueToday.length === 0 ? (
             <EmptyState icon={<IconTodo width={28} height={28} />} title="今天没有待办" description="到期日落在今天或已逾期的待办会显示在这里；没有日期的待办在「待办」页。" />
           ) : (
-            <ul className="record-list divide-y divide-line">
+            <ul className="record-list divide-y divide-dashed divide-line">
               {overview.tasksDueToday.map((task) => {
                 const overdue = Boolean(task.dueDate) && task.dueDate! < overview.today;
                 return (
                   <li key={task.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                     <Link to="/todo" className="min-w-0 flex-1 break-words text-sm font-medium hover:text-brand">{task.title}</Link>
                     <span className="flex shrink-0 items-center gap-2 text-xs text-muted">
-                      {task.dueTime ? task.dueTime.slice(0, 5) : '全天'}
-                      {overdue ? <span className="chip bg-red-500/10 font-medium text-red-600">逾期</span> : null}
+                      <span className="tabular-nums">{task.dueTime ? task.dueTime.slice(0, 5) : '全天'}</span>
+                      {overdue ? <span className="chip-overdue">逾期</span> : null}
                     </span>
                   </li>
                 );
@@ -143,26 +145,26 @@ export function DashboardPage() {
 
         </div>
         <div className="space-y-5">
-        <Card title="快速开始" subtitle="把想法落在这里，再安心做下一件事。">
-          <div className="space-y-2">
-            <button type="button" className="btn-ghost w-full !justify-start" onClick={() => { setDialogMode('task'); setDialogOpen(true); }}><IconTodo className="text-task" />记一件待办<span className="ml-auto text-muted" aria-hidden="true">+</span></button>
-            <button type="button" className="btn-ghost w-full !justify-start" onClick={() => { setDialogMode('event'); setDialogOpen(true); }}><IconCalendar className="text-event" />安排一段时间<span className="ml-auto text-muted" aria-hidden="true">+</span></button>
+        <Card tape="right" title="快速开始" subtitle="把想法落在这里，再安心做下一件事。">
+          <div className="space-y-2.5">
+            <button type="button" className="btn-ghost w-full !justify-start" onClick={() => { setDialogMode('task'); setDialogOpen(true); }}><IconTodo className="text-task" />记一件待办<span className="ml-auto flex h-5 w-5 items-center justify-center rounded-full bg-brand text-white" aria-hidden="true">+</span></button>
+            <button type="button" className="btn-ghost w-full !justify-start" onClick={() => { setDialogMode('event'); setDialogOpen(true); }}><IconCalendar className="text-event" />安排一段时间<span className="ml-auto flex h-5 w-5 items-center justify-center rounded-full bg-brand text-white" aria-hidden="true">+</span></button>
           </div>
         </Card>
         {upcomingBills.length > 0 ? (
-          <Card title="即将扣费" subtitle={`未来 7 天 · ${upcomingBills.length} 项`}>
-            <ul className="record-list divide-y divide-line">
+          <Card tape="center" dogear title="即将扣费" subtitle={`未来 7 天 · ${upcomingBills.length} 项`}>
+            <ul className="record-list divide-y divide-dashed divide-line">
               {upcomingBills.map((s) => (
                 <li key={`${s.id}-${s.date}`} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm">{s.name}</p>
-                    <p className="text-xs text-muted">
+                    <p className="text-xs text-muted tabular-nums">
                       预计扣费 {s.date}
-                      {s.autoRenew ? '' : ' · 已关闭自动续费'}
+                      {s.autoRenew ? '' : <> · <span className="nowrap">已关闭自动续费</span></>}
                     </p>
                   </div>
-                  <span className="shrink-0 text-sm">
-                    {s.amount} <span className="text-xs text-muted">{s.currency}</span>
+                  <span className="shrink-0 font-mono text-sm font-semibold tabular-nums">
+                    {s.amount} <span className="text-xs font-normal text-muted">{s.currency}</span>
                   </span>
                 </li>
               ))}
@@ -171,6 +173,9 @@ export function DashboardPage() {
         ) : null}
         </div>
       </div>
+
+      {/* 手帐签名句：收敛页面节奏 */}
+      <p className="motto mt-8">「 慢慢来，比较快。 」</p>
 
       <QuickAddDialog
         open={dialogOpen}

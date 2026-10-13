@@ -7,3 +7,4 @@ dist/
 backups/
 *.tsbuildinfo
 .playwright-cli/
+design-preview/

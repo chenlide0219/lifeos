@@ -44,7 +44,7 @@ function ThemeToggle({ compact = false }: { compact?: boolean }) {
       aria-label={`切换主题，当前${label}`}
       className={
         compact
-          ? 'inline-flex h-11 w-11 items-center justify-center rounded-xl border border-line text-muted transition-colors hover:text-ink'
+          ? 'inline-flex h-11 w-11 items-center justify-center rounded-full border-[1.5px] border-line text-muted transition-colors hover:text-ink'
           : 'nav-item w-full'
       }
     >
@@ -64,16 +64,17 @@ export function Layout() {
     <div className="min-h-screen bg-canvas">
       <a href="#main-content" className="skip-link">跳转到主要内容</a>
       {/* ── 桌面端左侧导航 ── */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r border-line bg-surface md:flex">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r-[1.5px] border-dashed border-line bg-surface md:flex">
         <div className="flex items-center gap-3 px-6 pb-8 pt-8">
-          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand text-sm font-bold text-white">
-            L
+          <span className="relative flex h-9 w-9 -rotate-6 items-center justify-center rounded-md bg-brand font-serif text-base font-bold text-white shadow-card">
+            生
+            <span aria-hidden="true" className="tape absolute -top-2 left-1/2 h-2.5 w-8 -translate-x-1/2 opacity-80" />
           </span>
-          <div><span className="text-lg font-semibold tracking-tight">Life OS</span><p className="text-[10px] tracking-[0.18em] text-muted">个人工作站</p></div>
+          <div><span className="font-serif text-lg tracking-tight">Life OS</span><p className="text-[10px] tracking-[0.28em] text-pencil">个人工作站</p></div>
         </div>
 
         <nav aria-label="主导航" className="flex-1 space-y-1 px-4">
-          <p className="px-3 pb-2 text-[11px] font-medium tracking-widest text-muted">工作空间</p>
+          <p className="px-3 pb-2 text-[11px] font-medium tracking-widest text-pencil">工作空间</p>
           {NAV.map(({ to, label, Icon }) => (
             <NavLink
               key={to}
@@ -87,7 +88,7 @@ export function Layout() {
           ))}
         </nav>
 
-        <div className="space-y-1 border-t border-line p-3">
+        <div className="space-y-1 border-t-[1.5px] border-dashed border-line p-3">
           <ThemeToggle />
           <div className="flex items-center justify-between gap-2 rounded-xl px-3 py-2">
             <div className="min-w-0">
@@ -108,20 +109,21 @@ export function Layout() {
       </aside>
 
       {/* ── 移动端顶栏 ── */}
-      <header className="sticky top-0 z-20 flex items-center justify-between border-b border-line bg-surface px-4 py-2 md:hidden">
+      <header className="sticky top-0 z-20 flex items-center justify-between border-b-[1.5px] border-dashed border-line bg-surface px-4 py-2 md:hidden">
         <div className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-xs font-bold text-white">
-            L
+          <span className="relative flex h-8 w-8 -rotate-6 items-center justify-center rounded-md bg-brand font-serif text-sm font-bold text-white shadow-card">
+            生
+            <span aria-hidden="true" className="tape absolute -top-2 left-1/2 h-2.5 w-7 -translate-x-1/2 opacity-80" />
           </span>
-          <span className="text-sm font-semibold">{current?.label ?? 'Life OS'}</span>
+          <span className="font-serif text-[15px] tracking-tight">{current?.label ?? 'Life OS'}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" aria-label="语音录入" title="语音录入" onClick={() => setVoiceOpen(true)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-brand text-white"><IconMic /></button>
+          <button type="button" aria-label="语音录入" title="语音录入" onClick={() => setVoiceOpen(true)} className="inline-flex h-11 w-11 items-center justify-center rounded-full border-[1.5px] border-ink text-ink"><IconMic /></button>
           <ThemeToggle compact />
           <NavLink
             to="/settings"
             aria-label="设置"
-            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-line text-muted transition-colors hover:text-ink"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full border-[1.5px] border-line text-muted transition-colors hover:text-ink"
           >
             <IconSettings />
           </NavLink>
@@ -142,8 +144,8 @@ export function Layout() {
         onClick={() => setVoiceOpen(true)}
         title="语音录入"
         aria-label="语音录入"
-        className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-4 z-30 hidden h-12 w-12 items-center justify-center rounded-full
-                   bg-brand text-white shadow-pop transition-transform active:scale-95
+        className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-4 z-30 hidden h-12 w-12 -rotate-3 items-center justify-center rounded-full
+                   bg-brand text-white shadow-pop ring-2 ring-inset ring-white/40 transition-transform active:scale-95
                    md:bottom-8 md:right-8 md:flex"
       >
         <IconMic width={24} height={24} />
@@ -156,7 +158,7 @@ export function Layout() {
       />
 
       {/* ── 移动端底部导航 ── */}
-      <nav aria-label="手机导航" className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+      <nav aria-label="手机导航" className="fixed inset-x-0 bottom-0 z-20 border-t-[1.5px] border-dashed border-line bg-surface-2 pb-[env(safe-area-inset-bottom)] md:hidden">
         <div className="grid grid-cols-6">
           {MOBILE_NAV.map(({ to, label, Icon }) => (
             <NavLink
@@ -164,13 +166,19 @@ export function Layout() {
               to={to}
               end={to === '/'}
               className={({ isActive }) =>
-                `flex min-w-0 flex-col items-center gap-1 py-2.5 text-[10px] font-medium transition-colors ${
-                  isActive ? 'bg-brand/10 text-brand' : 'text-muted'
+                `flex min-w-0 flex-col items-center gap-1 py-2.5 text-[10px] transition-colors ${
+                  isActive ? 'font-bold text-ink' : 'font-medium text-pencil'
                 }`
               }
             >
-              <Icon width={21} height={21} />
-              <span>{label}</span>
+              {({ isActive }) => (
+                <>
+                  <Icon width={21} height={21} />
+                  <span>{label}</span>
+                  {/* 当前页：印章红圆点（不靠整块底色，收敛一些） */}
+                  <span aria-hidden="true" className={`h-1 w-1 rounded-full ${isActive ? 'bg-brand' : 'bg-transparent'}`} />
+                </>
+              )}
             </NavLink>
           ))}
         </div>

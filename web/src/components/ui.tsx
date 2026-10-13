@@ -47,20 +47,45 @@ export function Card({
   action,
   children,
   className = '',
+  tape,
+  dogear = false,
+  ruled = false,
 }: {
   title?: string;
   subtitle?: string;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** 和纸胶带：压在卡片上沿，做「贴上去」的分组感 */
+  tape?: 'left' | 'center' | 'right';
+  /** 右上折角（像翻起来的纸角） */
+  dogear?: boolean;
+  /** 账本横线（仅为质感，用于列表卡） */
+  ruled?: boolean;
 }) {
   return (
-    <section className={`card p-4 sm:p-6 ${className}`}>
+    <section
+      className={`card relative p-4 sm:p-6 ${ruled ? 'card-ruled' : ''} ${dogear ? 'card-dogear' : ''} ${className}`}
+    >
+      {tape ? (
+        <span
+          aria-hidden="true"
+          className={`tape absolute -top-2.5 z-10 ${
+            tape === 'left'
+              ? '-left-3 -rotate-6'
+              : tape === 'right'
+                ? '-right-3 rotate-6 tape-green'
+                : 'left-1/2 -translate-x-1/2 -rotate-2'
+          }`}
+        />
+      ) : null}
       {title ? (
-        <header className="section-heading">
+        <header className="section-heading has-doodle">
           <div>
-            <h2 className="text-sm font-semibold text-ink">{title}</h2>
-            {subtitle ? <p className="mt-0.5 text-xs text-muted">{subtitle}</p> : null}
+            <h2 className="text-ink">
+              <span className="hl">{title}</span>
+            </h2>
+            {subtitle ? <p className="mt-0.5">{subtitle}</p> : null}
           </div>
           {action}
         </header>

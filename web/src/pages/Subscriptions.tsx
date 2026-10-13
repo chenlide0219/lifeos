@@ -360,7 +360,7 @@ export function SubscriptionsPage() {
                     {STATUS_LABEL[sub.status] ?? sub.status} · {PERIOD_LABEL[sub.billingPeriod] ?? sub.billingPeriod} ·{' '}
                     {money(sub.price, sub.currency)}
                     {sub.monthlyEquivalent ? ` · 月均 ${sub.monthlyEquivalent}` : ''}
-                    {sub.autoRenew ? '' : ' · 已关闭自动续费'}
+                    {sub.autoRenew ? '' : <> · <span className="nowrap">已关闭自动续费</span></>}
                   </p>
                 </button>
                 <div className="row-actions">
