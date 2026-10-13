@@ -323,11 +323,24 @@ describe('多用户数据隔离', () => {
     await expectNoLeak(new Response(JSON.stringify(body)), '业务数据导出');
 
     for (const [table, count] of Object.entries(body.counts)) {
+      // `settings` 是**全局表**（没有 user_id），不属于任何账号，因此它的行出现在每个人
+      // 的导出里是正常且必要的（否则界面配置会丢）。这里只断言"按账号归属的表"为 0。
+      // 这条区分不是可有可无：本断言曾在本地通过、在服务器上失败——因为本地每次重建
+      // schema 后 settings 恰好是空的，掩盖了"全局表本来就会有行"这一事实。
+      if (table === 'settings') continue;
       assert.equal(count, 0, `bob 的导出里 ${table} 应为 0 行，实际 ${count}`);
     }
     for (const [table, rows] of Object.entries(body.data)) {
+      if (table === 'settings') continue;
       assert.equal(rows.length, 0, `bob 的导出里 ${table} 不应有任何行`);
     }
+
+    // 全局表里也绝不能出现微信绑定凭据（它是私有状态，导出时被排除）
+    const settingsRows = (body.data.settings ?? []) as { key?: string }[];
+    assert.ok(
+      !settingsRows.some((r) => r.key === 'wechat.private-channel'),
+      '导出中不得出现微信绑定凭据行',
+    );
 
     // alice 的导出则必须有数据（否则这条测试可能只是"导出坏了"）
     const aliceRes = await alice('/api/export/data.json');

@@ -113,12 +113,22 @@ CONTEXT_ENC="$(printf '%s' "$SEALED" | node -e 'let s="";process.stdin.on("data"
 JOB_KEY="e2e:$(date +%s)-$RANDOM"
 E2E_USER="${E2E_PREFIX}-$(date +%s)"
 
-USER_ID="$(psql "$TEST_URL" -tA -v ON_ERROR_STOP=1 -c "
-  DELETE FROM users WHERE username LIKE '${E2E_PREFIX}-%';
+# 分两条独立语句执行，且加 `-q`：
+#   - 把 `DELETE` 与 `INSERT ... RETURNING` 塞进同一个 `psql -c` 会让 psql 打印
+#     DELETE 的命令标签并与后面的 SQL 拼在一起（报 `syntax error at or near "0"`）；
+#   - 即使只有 INSERT，`psql -tA -c "... RETURNING id"` 也会在 id 之后**再打印一行命令标签**
+#     `INSERT 0 1`，于是捕获到的值会变成 `8INSERT01`（真的这样挂过）。
+#     所以既要 `-q` 抑制标签，又只取第一行，并校验它确实是数字。
+psql "$TEST_URL" -q -v ON_ERROR_STOP=1 -c "DELETE FROM users WHERE username LIKE '${E2E_PREFIX}-%';"
+USER_ID="$(psql "$TEST_URL" -qtA -v ON_ERROR_STOP=1 -c "
   INSERT INTO users (username, password_hash)
   VALUES ('${E2E_USER}', 'e2e-not-a-real-hash')
   RETURNING id;")"
-[ -n "$USER_ID" ] || { bad "创建演练账号失败"; exit 1; }
+USER_ID="$(printf '%s' "$USER_ID" | head -1 | tr -d '[:space:]')"
+case "$USER_ID" in
+  ''|*[!0-9]*) bad "演练账号 id 取值异常：[$USER_ID]（期望纯数字）"; exit 1 ;;
+esac
+[ "$USER_ID" -gt 0 ] || { bad "演练账号 id 非正数：$USER_ID"; exit 1; }
 
 psql "$TEST_URL" -q -v ON_ERROR_STOP=1 <<SQL
 -- 每账号一份微信绑定：有凭据 + 有上下文 + 窗口未用尽 => 可发送

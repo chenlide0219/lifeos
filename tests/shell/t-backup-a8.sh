@@ -70,11 +70,23 @@ if [ -n "$ART" ]; then
     bad "加密产物无法解密/解压"
   fi
 
-  # 产物是 .sql.gz.gpg：解密后仍是 gzip，需再解压才能看到明文 SQL
-  if gpg --batch --quiet --decrypt "$ART" 2>/dev/null | gunzip 2>/dev/null | grep -q 'CREATE TABLE'; then
-    ok "解密后可见建表语句，确认是真实数据库备份"
+  # 产物是 .sql.gz.gpg：解密后仍是 gzip，需再解压才能看到明文 SQL。
+  #
+  # 刻意**先落盘再检查**，而不是 `gpg | gunzip | grep -q`：
+  #   - `grep -q` 命中即退出并关闭管道，gunzip 会收到 SIGPIPE；
+  #   - 管道里任一段被 SIGPIPE 杀掉时，`set -o pipefail` 的最终退出码在不同环境下
+  #     并不可靠（实测过 PIPESTATUS=0 141 0 但整体返回 0）；
+  #   - 这个用例曾在 npm test 中偶发失败、单独跑却稳定通过，落盘后既消除了这类
+  #     不确定性，也让失败时能直接看到明文规模与开头，不必再靠猜。
+  PLAIN="$WORK/plain.sql"
+  if gpg --batch --quiet --decrypt "$ART" 2>/dev/null | gunzip 2>/dev/null > "$PLAIN" && [ -s "$PLAIN" ]; then
+    if grep -q 'CREATE TABLE' "$PLAIN"; then
+      ok "解密后可见建表语句，确认是真实数据库备份"
+    else
+      bad "解密内容不含建表语句（明文 $(wc -c < "$PLAIN") 字节，开头：$(head -c 120 "$PLAIN" | tr '\n' ' ')）"
+    fi
   else
-    bad "解密内容不含建表语句"
+    bad "解密/解压后明文为空（产物 $(stat -c %s "$ART" 2>/dev/null) 字节）"
   fi
 else
   bad "未找到任何加密备份产物"
