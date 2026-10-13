@@ -13,6 +13,7 @@
  *   - 输入开关关闭时不处理业务。
  */
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
 process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
@@ -24,7 +25,9 @@ process.env.SESSION_SECRET ??= 'test-secret-at-least-thirty-two-characters-long'
 process.env.WECHAT_MODEL_CALLS = '0';
 
 const { db, pool } = await import('../../src/server/db/client');
-const { sql } = await import('drizzle-orm');
+const { users } = await import('../../src/server/db/schema');
+const { hashPassword } = await import('../../src/server/lib/password');
+const { eq, sql } = await import('drizzle-orm');
 const { persistInbound } = await import('../../src/server/lib/wechat-inbox');
 const { processInboxBatch, buildRecentText } = await import('../../src/server/lib/wechat-processor');
 const { createOperation, loadActiveOperation, listRecentOperations } = await import(
@@ -33,10 +36,33 @@ const { createOperation, loadActiveOperation, listRecentOperations } = await imp
 const { emptyDraft } = await import('../../src/server/lib/wechat-draft');
 type Draft = import('../../src/server/lib/wechat-draft').Draft;
 const { zonedToInstant } = await import('../../src/server/lib/time');
+const { emptyWechatState, seal, updateWechatState } = await import('../../src/server/lib/wechat-state');
 
 const GEN = '77777777-7777-4777-8777-777777777777';
 const USER = 'owner@im.wechat';
 const NOW = new Date('2026-10-12T04:00:00Z');
+
+/**
+ * 归属账号 id（多用户数据隔离）。
+ *
+ * 本文件有一条用例用原生 SQL 直接灌 `tasks` 行，而 `tasks.user_id` 是 NOT NULL；
+ * 其余业务数据都由 `wechat-processor` 在生产路径上创建，归属由服务端决定。
+ * 账号只建一次（users 不在 clean() 的范围内），避免重复运行本文件时撞唯一约束。
+ */
+let userId = 0;
+async function ensureOwner(): Promise<void> {
+  if (userId !== 0) return;
+  await db
+    .insert(users)
+    .values({ username: 'wechat-processor', passwordHash: await hashPassword('Wechat-Proc-Pass-1!') })
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.username, 'wechat-processor'))
+    .limit(1);
+  userId = row!.id;
+}
 
 /**
  * 桩化模型：按消息内容给出确定性结果，让整条链路可离线复验。
@@ -105,6 +131,7 @@ async function clean(): Promise<void> {
 /** 直接灌入一条入站消息（绕过网络轮询） */
 async function feed(text: string, providerMessageId: string, receivedAt = NOW) {
   await persistInbound({
+    userId,
     generation: GEN,
     messages: [
       {
@@ -132,31 +159,35 @@ async function feed(text: string, providerMessageId: string, receivedAt = NOW) {
  * 消息会在入库阶段被静默拒绝，表现为"处理器什么都不做"。
  */
 async function installBoundState(): Promise<void> {
-  const state = {
-    generation: GEN,
-    account: 'sealed-placeholder',
-    context: null,
-    cursor: '',
-    revision: 'revision-1',
-    seen: [],
-    used: 0,
-    accepted: 0,
-    failed: 0,
-    unknown: 0,
-    warned: false,
-    warningResult: null,
-    pausedReason: null,
-    boundAt: NOW.getTime(),
-    refreshedAt: null,
-    lastInboundTime: 0,
-    listenerAt: null,
-    listenerError: null,
-  };
-  await db.execute(sql`
-    INSERT INTO settings(key, value)
-    VALUES ('wechat.private-channel', ${JSON.stringify(state)}::jsonb)
-    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-  `);
+  await updateWechatState(userId, (s) => {
+    Object.assign(s, emptyWechatState(userId), {
+      generation: GEN,
+      // 必须是真的 seal() 密文：绑定凭据按账号加密存储
+      account: seal({
+        token: 'processor-token',
+        userId: USER,
+        botId: 'lifeos-bot',
+        baseUrl: 'https://ilink.processor.test',
+      }),
+      context: null,
+      cursor: '',
+      // revision 是 uuid 列（原来存在 settings 的文本里，任何字符串都能塞）
+      revision: crypto.randomUUID(),
+      seen: [],
+      used: 0,
+      accepted: 0,
+      failed: 0,
+      unknown: 0,
+      warned: false,
+      warningResult: null,
+      pausedReason: null,
+      boundAt: NOW.getTime(),
+      refreshedAt: null,
+      lastInboundTime: 0,
+      listenerAt: null,
+      listenerError: null,
+    });
+  });
 }
 
 async function runBatch(now = NOW) {
@@ -170,18 +201,20 @@ async function outboxRows() {
   return rows.rows ?? [];
 }
 
-before(clean);
+before(async () => {
+  await ensureOwner();
+  await clean();
+});
 beforeEach(async () => {
+  await ensureOwner();
   await clean();
   await installBoundState();
 });
 after(async () => {
   await clean();
-  // 必须清掉私有渠道状态：本文件写入的是"已扫码绑定"状态，而 notification provider
-  // 一旦看到 account 就会走扫码发送路径（缺 context 时推迟发送），
-  // 会让 worker.test.ts 中依赖旧式 ILINK_TOKEN 通道的用例全部失败。
-  // 这与 wechat-inbox.test.ts / wechat-binding.test.ts 的清理方式一致。
-  await db.execute(sql`DELETE FROM settings WHERE key = 'wechat.private-channel'`);
+  // 必须清掉本账号的绑定行：绑定状态改为每账号一行 wechat_accounts，
+  // 残留的"已绑定的假账号"会被同库其他测试的渠道可用性判定算进去。
+  await db.execute(sql`DELETE FROM wechat_accounts WHERE user_id = ${userId}`);
   await pool.end();
 });
 
@@ -191,7 +224,7 @@ describe('新建草稿与预览', () => {
     const outcomes = await runBatch();
     assert.deepEqual(outcomes.map((o) => o.result), ['done']);
 
-    const op = await loadActiveOperation(GEN);
+    const op = await loadActiveOperation(userId, GEN);
     assert.ok(op, '应建立活动草稿');
     assert.equal(op!.status, 'pending_confirm');
     assert.ok(op!.shortCode, '应生成短码');
@@ -208,7 +241,7 @@ describe('新建草稿与预览', () => {
     await feed('/add 明天开会', 'm2');
     await runBatch();
 
-    const op = await loadActiveOperation(GEN);
+    const op = await loadActiveOperation(userId, GEN);
     assert.ok(op, '缺字段也要保存草稿');
     assert.equal(op!.status, 'awaiting_fields');
     assert.deepEqual(op!.missingFields, ['start_at']);
@@ -222,11 +255,11 @@ describe('新建草稿与预览', () => {
   it('补充信息后升级为待确认并换新短码', async () => {
     await feed('/add 明天开会', 'm3');
     await runBatch();
-    const before = await loadActiveOperation(GEN);
+    const before = await loadActiveOperation(userId, GEN);
 
     await feed('下午三点', 'm4');
     await runBatch();
-    const after = await loadActiveOperation(GEN);
+    const after = await loadActiveOperation(userId, GEN);
 
     assert.ok(after);
     assert.equal(after!.status, 'pending_confirm');
@@ -243,7 +276,7 @@ describe('确认提交与取消', () => {
   it('完整短码确认后库里同时有事项、提醒与回复', async () => {
     await feed('/add 明天下午三点科研楼开组会', 'c1');
     await runBatch();
-    const op = await loadActiveOperation(GEN);
+    const op = await loadActiveOperation(userId, GEN);
 
     await feed(`确认 ${op!.shortCode}`, 'c2');
     await runBatch();
@@ -257,13 +290,13 @@ describe('确认提交与取消', () => {
     const out = await outboxRows();
     assert.ok(out.some((r) => r.reply_type === 'created'), '应有已创建回复');
 
-    assert.equal(await loadActiveOperation(GEN), null, '提交后不应再有活动草稿');
+    assert.equal(await loadActiveOperation(userId, GEN), null, '提交后不应再有活动草稿');
   });
 
   it('错误短码不提交，并提示有效短码', async () => {
     await feed('/add 明天下午三点开组会', 'c3');
     await runBatch();
-    const op = await loadActiveOperation(GEN);
+    const op = await loadActiveOperation(userId, GEN);
 
     await feed('确认 ZZZZ', 'c4');
     await runBatch();
@@ -278,7 +311,7 @@ describe('确认提交与取消', () => {
   it('重复确认只返回原结果，不重复创建', async () => {
     await feed('/add 明天下午三点开组会', 'c5');
     await runBatch();
-    const op = await loadActiveOperation(GEN);
+    const op = await loadActiveOperation(userId, GEN);
     const code = op!.shortCode!;
 
     await feed(`确认 ${code}`, 'c6');
@@ -299,9 +332,9 @@ describe('确认提交与取消', () => {
 
     const ev = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM events`);
     assert.equal(ev.rows![0]!.n, 0, '取消不得写库');
-    assert.equal(await loadActiveOperation(GEN), null);
+    assert.equal(await loadActiveOperation(userId, GEN), null);
 
-    const recent = await listRecentOperations(GEN);
+    const recent = await listRecentOperations(userId, GEN);
     assert.equal(recent[0]!.status, 'cancelled');
   });
 });
@@ -310,8 +343,9 @@ describe('查询与最近操作', () => {
   it('查询读取真实数据库并包含今天到期的事项', async () => {
     // 直接写入一个今天到期的待办
     const today = '2026-10-12';
+    await ensureOwner();
     await db.execute(
-      sql`INSERT INTO tasks(title, due_date, due_time, status, source) VALUES ('交材料', ${today}, '18:00', 'todo', 'wechat')`,
+      sql`INSERT INTO tasks(user_id, title, due_date, due_time, status, source) VALUES (${userId}, '交材料', ${today}, '18:00', 'todo', 'wechat')`,
     );
 
     await feed('/today', 'q1');
@@ -329,19 +363,19 @@ describe('查询与最近操作', () => {
     await feed('取消', 'r2');
     await runBatch();
 
-    const text = await buildRecentText(GEN);
+    const text = await buildRecentText(userId, GEN);
     assert.match(text, /已取消/);
   });
 
   it('查询不会破坏活动草稿', async () => {
     await feed('/add 明天下午三点开组会', 'q2');
     await runBatch();
-    const before = await loadActiveOperation(GEN);
+    const before = await loadActiveOperation(userId, GEN);
 
     await feed('/today', 'q3');
     await runBatch();
 
-    const after = await loadActiveOperation(GEN);
+    const after = await loadActiveOperation(userId, GEN);
     assert.ok(after, '查询后草稿仍在');
     assert.equal(after!.id, before!.id);
     assert.equal(after!.version, before!.version, '查询不得改动草稿版本');
@@ -356,7 +390,7 @@ describe('输入开关与终态', () => {
 
     const ev = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM events`);
     assert.equal(ev.rows![0]!.n, 0);
-    assert.equal(await loadActiveOperation(GEN), null);
+    assert.equal(await loadActiveOperation(userId, GEN), null);
 
     const counts = await db.execute<{ status: string; n: number }>(
       sql`SELECT status, count(*)::int AS n FROM wechat_inbox GROUP BY status`,
@@ -366,6 +400,7 @@ describe('输入开关与终态', () => {
 
   it('已保存事项操作被拒绝，且不顺带取消草稿', async () => {
     await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'event',
       draft: {
@@ -382,7 +417,7 @@ describe('输入开关与终态', () => {
     await feed('取消明天会议', 'u1');
     await runBatch();
 
-    const op = await loadActiveOperation(GEN);
+    const op = await loadActiveOperation(userId, GEN);
     assert.ok(op, '不得顺带取消当前草稿');
     assert.equal(op!.status, 'pending_confirm');
 
@@ -393,12 +428,12 @@ describe('输入开关与终态', () => {
   it('已有草稿时新创建请求被拒绝，不覆盖草稿', async () => {
     await feed('/add 明天下午三点开组会', 'n1');
     await runBatch();
-    const before = await loadActiveOperation(GEN);
+    const before = await loadActiveOperation(userId, GEN);
 
     await feed('/add 后天买牛奶', 'n2');
     await runBatch();
 
-    const after = await loadActiveOperation(GEN);
+    const after = await loadActiveOperation(userId, GEN);
     assert.equal(after!.id, before!.id, '不得覆盖或新建第二个草稿');
     const out = await outboxRows();
     assert.match(out[out.length - 1]!.body, /请先确认或取消/);

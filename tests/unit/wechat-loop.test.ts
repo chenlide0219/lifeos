@@ -13,6 +13,7 @@
  * 手法：真实数据库 + 真实草稿/提交/发送代码，只有 HTTP 与模型是桩。
  */
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
 process.env.DATABASE_URL ??= process.env.TEST_DATABASE_URL;
@@ -22,24 +23,39 @@ if (!new URL(process.env.DATABASE_URL).pathname.endsWith('_test')) {
 }
 process.env.SESSION_SECRET ??= 'test-secret-at-least-thirty-two-characters-long';
 
-process.env.ILINK_TOKEN = 'loop-token';
-process.env.ILINK_TO_USER_ID = 'loop-recipient';
-process.env.ILINK_BASE_URL = 'https://ilink.loop.test';
-process.env.ILINK_CONTEXT_TOKEN = 'loop-context';
-
 const { db, pool } = await import('../../src/server/db/client');
-const { sql } = await import('drizzle-orm');
+const { users } = await import('../../src/server/db/schema');
+const { hashPassword } = await import('../../src/server/lib/password');
+const { eq, sql } = await import('drizzle-orm');
 const { persistInbound } = await import('../../src/server/lib/wechat-inbox');
 const { processInboxBatch } = await import('../../src/server/lib/wechat-processor');
 const { loadActiveOperation } = await import('../../src/server/lib/wechat-operations');
 const { sendPendingReplies } = await import('../../src/worker/outbox-sender');
 const { emptyDraft } = await import('../../src/server/lib/wechat-draft');
 const { zonedToInstant } = await import('../../src/server/lib/time');
-const { seal } = await import('../../src/server/lib/wechat-state');
+const { emptyWechatState, seal, updateWechatState } = await import('../../src/server/lib/wechat-state');
 
 const GEN = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const USER = 'loop-owner@im.wechat';
 const INBOX = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+
+/**
+ * 归属账号 id（多用户数据隔离）。
+ *
+ * 绑定凭据、发送窗口与草稿都按账号归属：`wechat_accounts.user_id` 外键指向 `users`，
+ * 因此夹具必须先有真实账号。只建一次（clean() 不清理 users），
+ * 避免重复运行本文件时撞唯一约束。
+ */
+let userId = 0;
+async function ensureOwner(): Promise<void> {
+  if (userId !== 0) return;
+  await db
+    .insert(users)
+    .values({ username: 'wechat-loop', passwordHash: await hashPassword('Wechat-Loop-Pass-1!') })
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, 'wechat-loop')).limit(1);
+  userId = row!.id;
+}
 
 const realFetch = globalThis.fetch;
 let sentTexts: string[] = [];
@@ -60,38 +76,38 @@ function installFetch(): void {
 }
 
 async function installBoundState(): Promise<void> {
-  const state = {
-    generation: GEN,
-    // 必须是**真实 seal 出来的凭据**：provider 会真的去解密。
-    // 设为 null 会让 `isReplyStillValid` 正确判定"尚未绑定"并作废全部回复——
-    // 看起来像发送失败，其实是夹具错了。
-    account: seal({
-      token: 'loop-token',
-      userId: 'loop-recipient',
-      botId: 'lifeos-bot',
-      baseUrl: 'https://ilink.loop.test',
-    }),
-    context: seal('loop-context'),
-    cursor: '',
-    revision: 'rev-loop',
-    seen: [],
-    used: 0,
-    accepted: 0,
-    failed: 0,
-    unknown: 0,
-    warned: false,
-    warningResult: null,
-    pausedReason: null,
-    boundAt: Date.now(),
-    refreshedAt: Date.now(),
-    lastInboundTime: 0,
-    listenerAt: null,
-    listenerError: null,
-  };
-  await db.execute(sql`
-    INSERT INTO settings(key, value) VALUES ('wechat.private-channel', ${JSON.stringify(state)}::jsonb)
-    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-  `);
+  await updateWechatState(userId, (s) => {
+    Object.assign(s, emptyWechatState(userId), {
+      generation: GEN,
+      // 必须是**真实 seal 出来的凭据**：provider 会真的去解密。
+      // 设为 null 会让 `isReplyStillValid` 正确判定"尚未绑定"并作废全部回复——
+      // 看起来像发送失败，其实是夹具错了。
+      account: seal({
+        token: 'loop-token',
+        userId: 'loop-recipient',
+        botId: 'lifeos-bot',
+        baseUrl: 'https://ilink.loop.test',
+      }),
+      // 有上下文才"可发送"：只写凭据不写上下文只是"等待上下文"
+      context: seal('loop-context'),
+      cursor: '',
+      // revision 是 uuid 列；发送预约与回填必须落在同一修订号上
+      revision: crypto.randomUUID(),
+      seen: [],
+      used: 0,
+      accepted: 0,
+      failed: 0,
+      unknown: 0,
+      warned: false,
+      warningResult: null,
+      pausedReason: null,
+      boundAt: Date.now(),
+      refreshedAt: Date.now(),
+      lastInboundTime: 0,
+      listenerAt: null,
+      listenerError: null,
+    });
+  });
 }
 
 /** 桩化模型：一句话直接给出完整事件草稿 */
@@ -117,6 +133,7 @@ const stubDeps = {
 
 async function feed(text: string, id: string) {
   await persistInbound({
+    userId,
     generation: GEN,
     messages: [
       {
@@ -154,10 +171,13 @@ async function clean(): Promise<void> {
   await db.execute(sql`DELETE FROM notification_jobs`);
   await db.execute(sql`DELETE FROM notification_rules`);
   await db.execute(sql`DELETE FROM events`);
-  await db.execute(sql`DELETE FROM settings WHERE key = 'wechat.private-channel'`);
+  // 绑定状态是"每账号一行 wechat_accounts"：清场必须按账号删行，
+  // 否则本文件残留的假绑定会让同库其他测试把它算成可发送账号
+  await db.execute(sql`DELETE FROM wechat_accounts WHERE user_id = ${userId}`);
 }
 
 before(async () => {
+  await ensureOwner();
   await clean();
   installFetch();
 });
@@ -182,7 +202,7 @@ describe('创建闭环与投递选择', () => {
     // 1) 建草稿
     await feed('/add 明天下午三点科研楼开组会', 'loop-1');
     await runBatch();
-    const draft = await loadActiveOperation(GEN);
+    const draft = await loadActiveOperation(userId, GEN);
     assert.ok(draft, '应建立草稿');
     assert.ok(draft!.shortCode, '应有确认短码');
 
@@ -198,7 +218,7 @@ describe('创建闭环与投递选择', () => {
     await runBatch();
 
     // 提交后不应再有活动草稿，且库里应有事项与提醒任务
-    assert.equal(await loadActiveOperation(GEN), null, '提交后草稿结束');
+    assert.equal(await loadActiveOperation(userId, GEN), null, '提交后草稿结束');
     const ev = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM events`);
     assert.equal(ev.rows![0]!.n, 1, '应创建事项');
     const jobs = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM notification_jobs WHERE status='pending'`);
@@ -226,7 +246,7 @@ describe('创建闭环与投递选择', () => {
   it('预览未发出就被提交：预览必须作废，绝不迟到送达', async () => {
     await feed('/add 明天下午三点科研楼开组会', 'loop-3');
     await runBatch();
-    const draft = await loadActiveOperation(GEN);
+    const draft = await loadActiveOperation(userId, GEN);
 
     // 关键：**不先发送预览**，直接确认短码 → 提交会把操作版本推高
     await feed(`确认 ${draft!.shortCode}`, 'loop-4');
@@ -265,7 +285,7 @@ describe('创建闭环与投递选择', () => {
   it('重复确认不产生第二条事项，也不重复发送创建回执', async () => {
     await feed('/add 明天下午三点开组会', 'loop-7');
     await runBatch();
-    const draft = await loadActiveOperation(GEN);
+    const draft = await loadActiveOperation(userId, GEN);
     const code = draft!.shortCode!;
 
     await feed(`确认 ${code}`, 'loop-8');
@@ -284,7 +304,7 @@ describe('创建闭环与投递选择', () => {
   it('草稿过期后必须明确告知用户未保存（PRD 3.4）', async () => {
     await feed('/add 明天下午三点开组会', 'loop-exp-1');
     await runBatch();
-    const draft = await loadActiveOperation(GEN);
+    const draft = await loadActiveOperation(userId, GEN);
     assert.ok(draft, '应建立草稿');
 
     // 把草稿的到期时间推到过去，模拟"放了超过 30 分钟"
@@ -319,7 +339,7 @@ describe('创建闭环与投递选择', () => {
   it('过期通知只发一次（重复处理不重复打扰）', async () => {
     await feed('/add 明天下午三点开组会', 'loop-exp-4');
     await runBatch();
-    const draft = await loadActiveOperation(GEN);
+    const draft = await loadActiveOperation(userId, GEN);
     await db.execute(
       sql`UPDATE wechat_operations SET expires_at = now() - interval '5 minutes' WHERE id = ${draft!.id}`,
     );

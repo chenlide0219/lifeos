@@ -6,30 +6,73 @@
  * 绝不凭接口返回推断送达。
  */
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { sql } from 'drizzle-orm';
 import { requireTestDatabase } from '../helpers/guard';
 
 requireTestDatabase();
+// 绑定凭据按账号加密存储（AES-256-GCM），夹具要写出真实可解密的密文，因此必须有密钥
+process.env.SESSION_SECRET ??= 'test-secret-at-least-thirty-two-characters-long';
 
 const { db, pool } = await import('../../src/server/db/client');
 const { createApp } = await import('../../src/server/app');
 const { users } = await import('../../src/server/db/schema');
 const { hashPassword } = await import('../../src/server/lib/password');
+const { emptyWechatState, seal, updateWechatState } = await import('../../src/server/lib/wechat-state');
 
 const app = createApp();
 const PASSWORD = 'Notify-Test-Pass-1!';
 let cookie = '';
+let userId = 0;
 
-const CREDS = { ILINK_TOKEN: 'test-token', ILINK_TO_USER_ID: 'test-recipient' };
-
-function withProvider(): void {
-  Object.assign(process.env, CREDS);
+/**
+ * "渠道已配置" = 该账号自己有一行**可发送**的绑定。
+ *
+ * ⚠️ 旧夹具是设 `ILINK_TOKEN` / `ILINK_TO_USER_ID`——那条全局兜底已被有意移除
+ * （一个全局凭据无法归属到任何账号），因此这里改为写 `wechat_accounts`。
+ * 必须有 `context`：只写凭据不写上下文会被判成"等待上下文"，
+ * `/api/notifications/test` 会返回 409 而不是 202。
+ */
+async function withProvider(): Promise<void> {
+  await updateWechatState(userId, (s) => {
+    Object.assign(s, emptyWechatState(userId), {
+      generation: crypto.randomUUID(),
+      account: seal({
+        token: 'test-token',
+        userId: 'test-recipient',
+        botId: 'lifeos-bot',
+        baseUrl: 'https://ilink.test.invalid',
+      }),
+      context: seal('test-context'),
+      cursor: '',
+      revision: crypto.randomUUID(),
+      seen: [],
+      used: 0,
+      accepted: 0,
+      failed: 0,
+      unknown: 0,
+      warned: false,
+      warningResult: null,
+      pausedReason: null,
+      boundAt: Date.now(),
+      refreshedAt: Date.now(),
+      lastInboundTime: 0,
+      listenerAt: null,
+      listenerError: null,
+    });
+  });
 }
 
-function withoutProvider(): void {
-  delete process.env.ILINK_TOKEN;
-  delete process.env.ILINK_TO_USER_ID;
+/**
+ * "渠道未配置" = 没有任何可发送账号。
+ *
+ * 这里清的是**全部** `wechat_accounts` 行（而不只是本账号的）：渠道是否已配置
+ * 是全局读取（`isConfigured()` = 至少一个已绑定账号），同库其他测试残留的绑定
+ * 会让"未配置"用例变成 202。
+ */
+async function withoutProvider(): Promise<void> {
+  await db.execute(sql`DELETE FROM wechat_accounts`);
 }
 
 function request(path: string, init: RequestInit = {}): Promise<Response> {
@@ -49,8 +92,13 @@ async function systemJobCount(): Promise<number> {
 }
 
 before(async () => {
+  // TRUNCATE ... CASCADE 会连带清空 wechat_accounts（它外键指向 users）
   await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
-  await db.insert(users).values({ username: 'notify-test', passwordHash: await hashPassword(PASSWORD) });
+  const [owner] = await db
+    .insert(users)
+    .values({ username: 'notify-test', passwordHash: await hashPassword(PASSWORD) })
+    .returning({ id: users.id });
+  userId = owner!.id;
   const res = await app.request('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -62,17 +110,19 @@ before(async () => {
 
 beforeEach(async () => {
   await db.execute(sql`TRUNCATE notification_attempts, notification_jobs RESTART IDENTITY CASCADE`);
+  // 每个用例都从"没有任何绑定"开始，由用例自己显式建立所需的绑定状态
+  await withoutProvider();
 });
 
 after(async () => {
-  withoutProvider();
+  await withoutProvider();
   await db.execute(sql`TRUNCATE users, sessions, audit_logs RESTART IDENTITY CASCADE`);
   await pool.end();
 });
 
 describe('未配置渠道时不得伪造发送', () => {
   it('返回 503，且**不创建任何任务**（不排队、不假装已发送）', async () => {
-    withoutProvider();
+    await withoutProvider();
     const res = await request('/api/notifications/test', { method: 'POST' });
 
     assert.equal(res.status, 503, '未配置渠道必须明确失败，而不是返回成功');
@@ -85,7 +135,7 @@ describe('未配置渠道时不得伪造发送', () => {
   });
 
   it('拒绝信息里说明为何不会发送', async () => {
-    withoutProvider();
+    await withoutProvider();
     const body = await json<{ message: string }>(await request('/api/notifications/test', { method: 'POST' }));
     assert.ok(body.message.length > 10, '必须给出可读原因，而不是只有错误码');
   });
@@ -93,7 +143,7 @@ describe('未配置渠道时不得伪造发送', () => {
 
 describe('已配置渠道时只排队，结果以任务记录为准', () => {
   it('返回 202 与 jobId，并说明结果需以任务记录为准', async () => {
-    withProvider();
+    await withProvider();
     const res = await request('/api/notifications/test', { method: 'POST' });
     assert.equal(res.status, 202);
 
@@ -104,7 +154,7 @@ describe('已配置渠道时只排队，结果以任务记录为准', () => {
   });
 
   it('测试消息只尝试一次（用户就在跟前，无需后台反复重试）', async () => {
-    withProvider();
+    await withProvider();
     const body = await json<{ job: { id: string } }>(
       await request('/api/notifications/test', { method: 'POST' }),
     );
@@ -116,7 +166,7 @@ describe('已配置渠道时只排队，结果以任务记录为准', () => {
   });
 
   it('可以查询测试任务的真实状态与尝试记录', async () => {
-    withProvider();
+    await withProvider();
     const created = await json<{ job: { id: string } }>(
       await request('/api/notifications/test', { method: 'POST' }),
     );
@@ -129,19 +179,19 @@ describe('已配置渠道时只排队，结果以任务记录为准', () => {
   });
 
   it('查询不存在的测试任务返回 404', async () => {
-    withProvider();
+    await withProvider();
     const res = await request('/api/notifications/test/00000000-0000-0000-0000-000000000000');
     assert.equal(res.status, 404);
   });
 
   it('非法任务 ID 返回 400', async () => {
-    withProvider();
+    await withProvider();
     const res = await request('/api/notifications/test/not-a-uuid');
     assert.equal(res.status, 400);
   });
 
   it('连续发送触发限流，避免刷屏骚扰', async () => {
-    withProvider();
+    await withProvider();
     let last = 0;
     for (let i = 0; i < 6; i++) {
       last = (await request('/api/notifications/test', { method: 'POST' })).status;

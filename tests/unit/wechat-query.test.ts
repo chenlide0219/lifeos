@@ -20,7 +20,9 @@ if (!new URL(process.env.DATABASE_URL).pathname.endsWith('_test')) {
 }
 
 const { db, pool } = await import('../../src/server/db/client');
-const { sql } = await import('drizzle-orm');
+const { users } = await import('../../src/server/db/schema');
+const { hashPassword } = await import('../../src/server/lib/password');
+const { eq, sql } = await import('drizzle-orm');
 const { loadQueryData, resolveRange, rangeDayCount, runQuery } = await import(
   '../../src/server/lib/wechat-query'
 );
@@ -30,18 +32,37 @@ const { todayInTz, addDays, zonedToInstant } = await import('../../src/server/li
 const NOW = zonedToInstant(2026, 10, 12, 12, 0);
 const TODAY = todayInTz('Asia/Shanghai') && '2026-10-12';
 
+/**
+ * 归属账号 id（多用户数据隔离）。
+ *
+ * `events` / `tasks` 的 `user_id` 是 NOT NULL，本文件用原生 SQL 直接灌数据，
+ * 所以必须先把账号建出来、把 id 带上。只建一次，避免重复运行本文件时撞唯一约束。
+ */
+let userId = 0;
+async function ensureOwner(): Promise<void> {
+  if (userId !== 0) return;
+  await db
+    .insert(users)
+    .values({ username: 'wechat-query', passwordHash: await hashPassword('Wechat-Query-Pass-1!') })
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, 'wechat-query')).limit(1);
+  userId = row!.id;
+}
+
 async function seedEvent(title: string, dateStr: string, hour = 15, status = 'active') {
+  await ensureOwner();
   const [y, m, d] = dateStr.split('-').map(Number);
   await db.execute(sql`
-    INSERT INTO events(title, start_at, location, status, source)
-    VALUES (${title}, ${zonedToInstant(y!, m!, d!, hour, 0).toISOString()}, ${'地点'}, ${status}, 'wechat')
+    INSERT INTO events(user_id, title, start_at, location, status, source)
+    VALUES (${userId}, ${title}, ${zonedToInstant(y!, m!, d!, hour, 0).toISOString()}, ${'地点'}, ${status}, 'wechat')
   `);
 }
 
 async function seedTask(title: string, dueDate: string | null, dueTime: string | null, status = 'todo') {
+  await ensureOwner();
   await db.execute(sql`
-    INSERT INTO tasks(title, due_date, due_time, status, source)
-    VALUES (${title}, ${dueDate}, ${dueTime}, ${status}, 'wechat')
+    INSERT INTO tasks(user_id, title, due_date, due_time, status, source)
+    VALUES (${userId}, ${title}, ${dueDate}, ${dueTime}, ${status}, 'wechat')
   `);
 }
 
@@ -50,7 +71,11 @@ async function clean(): Promise<void> {
   await db.execute(sql`DELETE FROM tasks`);
 }
 
-before(clean);
+before(async () => {
+  // 查询一律按账号限定：夹具先确保账号存在，避免"没灌数据"的用例拿到 userId=0
+  await ensureOwner();
+  await clean();
+});
 beforeEach(clean);
 after(async () => {
   await clean();
@@ -92,7 +117,7 @@ describe('今日查询的真实结果与分组', () => {
     await seedTask('没日期的任务', null, null); // 收件箱
     await seedEvent('今天的会', TODAY, 15);
 
-    const data = await loadQueryData({ preset: 'today', date: null, filter: 'all' }, NOW);
+    const data = await loadQueryData(userId, { preset: 'today', date: null, filter: 'all' }, NOW);
     const labels = data.groups.groups.map((g) => g.label);
     const titles = data.groups.groups.flatMap((g) => g.items.map((i) => i.title));
 
@@ -116,7 +141,7 @@ describe('今日查询的真实结果与分组', () => {
     await seedTask('已取消的任务', TODAY, '11:00', 'cancelled');
     await seedTask('正常的任务', TODAY, '12:00', 'todo');
 
-    const data = await loadQueryData({ preset: 'today', date: null, filter: 'all' }, NOW);
+    const data = await loadQueryData(userId, { preset: 'today', date: null, filter: 'all' }, NOW);
     const titles = data.groups.groups.flatMap((g) => g.items.map((i) => i.title));
     assert.ok(titles.includes('正常的任务'));
     assert.ok(!titles.includes('已完成的任务'), '不含已完成');
@@ -127,7 +152,7 @@ describe('今日查询的真实结果与分组', () => {
     await seedEvent('取消掉的会', TODAY, 9, 'cancelled');
     await seedEvent('正常会议', TODAY, 10);
 
-    const data = await loadQueryData({ preset: 'today', date: null, filter: 'all' }, NOW);
+    const data = await loadQueryData(userId, { preset: 'today', date: null, filter: 'all' }, NOW);
     const titles = data.groups.groups.flatMap((g) => g.items.map((i) => i.title));
     assert.ok(titles.includes('正常会议'));
     assert.ok(!titles.includes('取消掉的会'));
@@ -135,21 +160,22 @@ describe('今日查询的真实结果与分组', () => {
 
   it('跨天事件按开始日归属，只在开始那天出现', async () => {
     // 事件从 10-13 开始、10-15 结束
+    await ensureOwner();
     const [y, m, d] = '2026-10-13'.split('-').map(Number);
     const start = zonedToInstant(y!, m!, d!, 9, 0);
     const end = zonedToInstant(2026, 10, 15, 18, 0);
     await db.execute(sql`
-      INSERT INTO events(title, start_at, end_at, status, source)
-      VALUES (${'跨天会议'}, ${start.toISOString()}, ${end.toISOString()}, 'active', 'wechat')
+      INSERT INTO events(user_id, title, start_at, end_at, status, source)
+      VALUES (${userId}, ${'跨天会议'}, ${start.toISOString()}, ${end.toISOString()}, 'active', 'wechat')
     `);
 
-    const onStart = await loadQueryData({ preset: 'date', date: '2026-10-13', filter: 'all' }, NOW);
+    const onStart = await loadQueryData(userId, { preset: 'date', date: '2026-10-13', filter: 'all' }, NOW);
     assert.ok(
       onStart.groups.groups.some((g) => g.items.some((i) => i.title === '跨天会议')),
       '开始日应出现',
     );
 
-    const onMiddle = await loadQueryData({ preset: 'date', date: '2026-10-14', filter: 'all' }, NOW);
+    const onMiddle = await loadQueryData(userId, { preset: 'date', date: '2026-10-14', filter: 'all' }, NOW);
     assert.ok(
       !onMiddle.groups.groups.some((g) => g.items.some((i) => i.title === '跨天会议')),
       '中间日不应重复出现（按开始日归属）',
@@ -161,7 +187,7 @@ describe('今日查询的真实结果与分组', () => {
     await seedTask('明天的任务', '2026-10-13', '09:00');
     await seedTask('没日期的任务', null, null);
 
-    const data = await loadQueryData({ preset: 'tomorrow', date: null, filter: 'all' }, NOW);
+    const data = await loadQueryData(userId, { preset: 'tomorrow', date: null, filter: 'all' }, NOW);
     const titles = data.groups.groups.flatMap((g) => g.items.map((i) => i.title));
     assert.ok(titles.includes('明天的任务'));
     assert.ok(!data.groups.groups.some((g) => g.label === '逾期'), '明天不应有逾期分组');
@@ -171,7 +197,7 @@ describe('今日查询的真实结果与分组', () => {
     await seedEvent('今天的会', TODAY, 15);
     await seedTask('今天的活', TODAY, '16:00');
 
-    const data = await loadQueryData({ preset: 'today', date: null, filter: 'task' }, NOW);
+    const data = await loadQueryData(userId, { preset: 'today', date: null, filter: 'task' }, NOW);
     const types = data.groups.groups.flatMap((g) => g.items.map((i) => i.type));
     assert.ok(types.includes('task'));
     assert.ok(!types.includes('event'), 'filter=task 不应包含事件');
@@ -181,7 +207,7 @@ describe('今日查询的真实结果与分组', () => {
     await seedEvent('今天的会', TODAY, 15);
     await seedTask('今天的活', TODAY, '16:00');
 
-    const data = await loadQueryData({ preset: 'today', date: null, filter: 'event' }, NOW);
+    const data = await loadQueryData(userId, { preset: 'today', date: null, filter: 'event' }, NOW);
     const types = data.groups.groups.flatMap((g) => g.items.map((i) => i.type));
     assert.ok(types.includes('event'));
     assert.ok(!types.includes('task'), 'filter=event 不应包含待办');
@@ -190,7 +216,7 @@ describe('今日查询的真实结果与分组', () => {
 
 describe('回复组装', () => {
   it('无结果时给出空文案而非报错', async () => {
-    const result = await runQuery({ preset: 'today', date: null, filter: 'all' }, NOW, null);
+    const result = await runQuery(userId, { preset: 'today', date: null, filter: 'all' }, NOW, null);
     assert.equal(result.total, 0);
     assert.match(result.body, /没有安排/);
   });
@@ -199,7 +225,7 @@ describe('回复组装', () => {
     for (let i = 0; i < 12; i += 1) {
       await seedTask(`任务${i}`, TODAY, `${String(9 + (i % 10)).padStart(2, '0')}:00`);
     }
-    const result = await runQuery({ preset: 'today', date: null, filter: 'all' }, NOW, null);
+    const result = await runQuery(userId, { preset: 'today', date: null, filter: 'all' }, NOW, null);
     assert.equal(result.total, 12);
     assert.equal(result.shown, 8, '最多显示 8 条');
     assert.match(result.body, /另有 4 条未显示/);
@@ -208,7 +234,7 @@ describe('回复组装', () => {
   it('查询后可附带草稿提示（不破坏草稿）', async () => {
     await seedTask('今天的活', TODAY, '16:00');
     const notice = '当前仍有「组会」草稿未保存，可继续修改、确认或取消。';
-    const result = await runQuery({ preset: 'today', date: null, filter: 'all' }, NOW, notice);
+    const result = await runQuery(userId, { preset: 'today', date: null, filter: 'all' }, NOW, notice);
     assert.match(result.body, /组会/);
     assert.match(result.body, /今天的活/);
   });

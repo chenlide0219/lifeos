@@ -21,23 +21,37 @@ if (!new URL(process.env.DATABASE_URL).pathname.endsWith('_test')) {
 }
 process.env.SESSION_SECRET ??= 'test-secret-at-least-thirty-two-characters-long';
 
-// 旧式通道凭据：让 provider 处于已配置状态（与生产"未扫码"时一致的最简单形态）
-process.env.ILINK_TOKEN = 'window-token';
-process.env.ILINK_TO_USER_ID = 'window-recipient';
-process.env.ILINK_BASE_URL = 'https://ilink.window.test';
-process.env.ILINK_CONTEXT_TOKEN = 'window-context';
-
 const { db, pool } = await import('../../src/server/db/client');
-const { sql } = await import('drizzle-orm');
+const { eq, sql } = await import('drizzle-orm');
 const { sendPendingReplies } = await import('../../src/worker/outbox-sender');
 const { tick } = await import('../../src/worker/core');
 const { enqueueReply } = await import('../../src/server/lib/wechat-outbox');
-const { seal } = await import('../../src/server/lib/wechat-state');
-const { notificationJobs, notificationRules } = await import('../../src/server/db/schema');
+const { emptyWechatState, seal, updateWechatState } = await import('../../src/server/lib/wechat-state');
+const { notificationJobs, notificationRules, users } = await import('../../src/server/db/schema');
+const { hashPassword } = await import('../../src/server/lib/password');
 
 const GEN = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const INBOX = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const NOW = new Date('2026-10-12T04:00:00Z');
+
+/**
+ * 归属账号 id（多用户数据隔离）。
+ *
+ * 提醒规则、提醒任务与回复队列都带 `user_id NOT NULL`，且
+ * `notification_jobs (rule_id, user_id)` 是**复合外键**指向 `notification_rules`，
+ * 因此本文件的规则与任务必须落在同一个账号名下。
+ * 账号只建一次（clean() 不清理 users），避免重复运行本文件时撞唯一约束。
+ */
+let userId = 0;
+async function ensureOwner(): Promise<void> {
+  if (userId !== 0) return;
+  await db
+    .insert(users)
+    .values({ username: 'wechat-window', passwordHash: await hashPassword('Wechat-Window-Pass-1!') })
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, 'wechat-window')).limit(1);
+  userId = row!.id;
+}
 
 const realFetch = globalThis.fetch;
 let sends = 0;
@@ -64,37 +78,43 @@ function installFetch(): void {
   }) as typeof fetch;
 }
 
-/** 写入"已扫码绑定"状态：扫码头路径与旧式通道共用同一套窗口计数 */
+/**
+ * 写入"已扫码绑定"状态：提醒与回复共用**该账号自己**那一行的 8/10 窗口计数。
+ *
+ * 凭据必须真的 `seal()` 出来（provider 会解密）；`context` 也必须存在，
+ * 否则 `canSendWechat` 判定为"等待上下文"，既不计入窗口也不会发出请求。
+ */
 async function installBoundState(generation: string): Promise<void> {
-  const state = {
-    generation,
-    account: seal({
-      token: 'window-token',
-      userId: 'window-recipient',
-      botId: 'lifeos-bot',
-      baseUrl: 'https://ilink.window.test',
-    }),
-    context: seal('window-context'),
-    cursor: '',
-    revision: 'rev-window',
-    seen: [],
-    used: 0,
-    accepted: 0,
-    failed: 0,
-    unknown: 0,
-    warned: false,
-    warningResult: null,
-    pausedReason: null,
-    boundAt: NOW.getTime(),
-    refreshedAt: NOW.getTime(),
-    lastInboundTime: NOW.getTime(),
-    listenerAt: null,
-    listenerError: null,
-  };
-  await db.execute(sql`
-    INSERT INTO settings(key, value) VALUES ('wechat.private-channel', ${JSON.stringify(state)}::jsonb)
-    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-  `);
+  await ensureOwner();
+  await updateWechatState(userId, (s) => {
+    Object.assign(s, emptyWechatState(userId), {
+      generation,
+      account: seal({
+        token: 'window-token',
+        userId: 'window-recipient',
+        botId: 'lifeos-bot',
+        baseUrl: 'https://ilink.window.test',
+      }),
+      // 有上下文才"可发送"
+      context: seal('window-context'),
+      cursor: '',
+      // revision 是 uuid 列（原来存在 settings 的文本里，任何字符串都能塞）
+      revision: crypto.randomUUID(),
+      seen: [],
+      used: 0,
+      accepted: 0,
+      failed: 0,
+      unknown: 0,
+      warned: false,
+      warningResult: null,
+      pausedReason: null,
+      boundAt: NOW.getTime(),
+      refreshedAt: NOW.getTime(),
+      lastInboundTime: NOW.getTime(),
+      listenerAt: null,
+      listenerError: null,
+    });
+  });
 }
 
 async function readState() {
@@ -104,11 +124,8 @@ async function readState() {
     warned: boolean;
     paused_reason: string | null;
   }>(sql`
-    SELECT (value->>'used')::int AS used,
-           (value->>'accepted')::int AS accepted,
-           (value->>'warned')::boolean AS warned,
-           value->>'pausedReason' AS paused_reason
-    FROM settings WHERE key = 'wechat.private-channel'
+    SELECT used, accepted, warned, paused_reason
+    FROM wechat_accounts WHERE user_id = ${userId}
   `);
   return rows.rows![0]!;
 }
@@ -117,19 +134,22 @@ async function clean(): Promise<void> {
   await db.execute(sql`DELETE FROM wechat_outbox`);
   await db.execute(sql`DELETE FROM notification_jobs`);
   await db.execute(sql`DELETE FROM notification_rules`);
-  await db.execute(sql`DELETE FROM settings WHERE key = 'wechat.private-channel'`);
+  // 绑定状态是"每账号一行 wechat_accounts"：按账号删行，避免污染同库其他测试
+  await db.execute(sql`DELETE FROM wechat_accounts WHERE user_id = ${userId}`);
 }
 
 /** 造一条到期的提醒任务，供 core.tick() 领取 */
 async function seedReminderJob(key: string, title: string, body: string) {
+  await ensureOwner();
   const subjectId = crypto.randomUUID();
   const [rule] = await db
     .insert(notificationRules)
-    .values({ subjectType: 'event', subjectId, channel: 'wechat', enabled: true })
+    .values({ userId, subjectType: 'event', subjectId, channel: 'wechat', enabled: true })
     .returning({ id: notificationRules.id, subjectId: notificationRules.subjectId });
   const [job] = await db
     .insert(notificationJobs)
     .values({
+      userId,
       ruleId: rule!.id,
       subjectType: 'event',
       subjectId: rule!.subjectId,
@@ -147,7 +167,9 @@ async function seedReminderJob(key: string, title: string, body: string) {
 }
 
 async function seedReply(key: string, body: string) {
+  await ensureOwner();
   await enqueueReply(db, {
+    userId,
     bindingGeneration: GEN,
     sourceInboxId: INBOX,
     replyType: 'preview',
@@ -158,6 +180,7 @@ async function seedReply(key: string, body: string) {
 }
 
 before(async () => {
+  await ensureOwner();
   await clean();
   installFetch();
 });

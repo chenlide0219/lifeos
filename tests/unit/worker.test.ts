@@ -18,16 +18,21 @@ import { requireTestDatabase } from '../helpers/guard';
 // 硬性守卫：测试库名必须以 _test 结尾，否则直接抛错终止
 requireTestDatabase();
 
-const CREDENTIALS = {
-  ILINK_TOKEN: 'test-token',
-  ILINK_TO_USER_ID: 'test-recipient',
-  ILINK_BASE_URL: 'https://ilink.test.invalid',
-  MISSED_AFTER_MINUTES: '120',
-};
-Object.assign(process.env, CREDENTIALS);
+/**
+ * 错过阈值仍由环境变量控制（与"渠道是否配置"无关）。
+ *
+ * ⚠️ `ILINK_*` 环境变量**不再**能让渠道变成"已配置"：一个全局凭据无法归属到
+ * 任何账号，那条兜底已被有意移除。因此本文件的"渠道已配置"夹具改为给
+ * `userId` 写一行**可发送**的 `wechat_accounts`（见 `bindAccount`），
+ * "渠道未配置"则是"没有任何可发送账号"（见 `unbindAccount`）。
+ */
+process.env.MISSED_AFTER_MINUTES ??= '120';
+process.env.SESSION_SECRET ??= 'test-secret-at-least-thirty-two-characters-long';
 
 const { db, pool } = await import('../../src/server/db/client');
-const { notificationJobs, notificationAttempts } = await import('../../src/server/db/schema');
+const { notificationJobs, notificationAttempts, users } = await import('../../src/server/db/schema');
+const { hashPassword } = await import('../../src/server/lib/password');
+const { emptyWechatState, seal, updateWechatState } = await import('../../src/server/lib/wechat-state');
 const {
   tick,
   claimDueJobs,
@@ -47,16 +52,67 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function withCredentials(): void {
-  Object.assign(process.env, CREDENTIALS);
+/**
+ * "渠道已配置" = 该账号自己有一行可发送的绑定。
+ *
+ * 必须有 `context`：只写凭据不写上下文只会被判成"等待上下文"，照样不可发送，
+ * 于是任务一直停在 pending——看起来像调度坏了，其实是夹具少了一半。
+ */
+async function bindAccount(): Promise<void> {
+  await ensureOwner();
+  await updateWechatState(userId, (s) => {
+    Object.assign(s, emptyWechatState(userId), {
+      generation: crypto.randomUUID(),
+      account: seal({
+        token: 'test-token',
+        userId: 'test-recipient',
+        botId: 'lifeos-bot',
+        baseUrl: 'https://ilink.test.invalid',
+      }),
+      context: seal('test-context'),
+      cursor: '',
+      revision: crypto.randomUUID(),
+      seen: [],
+      used: 0,
+      accepted: 0,
+      failed: 0,
+      unknown: 0,
+      warned: false,
+      warningResult: null,
+      pausedReason: null,
+      boundAt: Date.now(),
+      refreshedAt: Date.now(),
+      lastInboundTime: 0,
+      listenerAt: null,
+      listenerError: null,
+    });
+  });
 }
 
-function withoutCredentials(): void {
-  delete process.env.ILINK_TOKEN;
-  delete process.env.ILINK_TO_USER_ID;
+/** "渠道未配置" = 该账号没有绑定行 → 可发送账号集合为空 */
+async function unbindAccount(): Promise<void> {
+  if (userId === undefined) return;
+  await db.execute(sql`DELETE FROM wechat_accounts WHERE user_id = ${userId}`);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 归属账号（多用户数据隔离）：提醒任务必须带 `user_id`。
+ *
+ * 只建立一次（users 不在 reset() 的清理范围内），并在 `insertJob` 里复用它的 id。
+ */
+let userId: number;
+async function ensureOwner(): Promise<void> {
+  if (userId !== undefined) return;
+  await db
+    .insert(users)
+    .values({ username: 'worker-test', passwordHash: await hashPassword('Worker-Test-Pass-1!') })
+    // 本文件从不清理 users；重复单独运行本文件时靠唯一用户名幂等
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, 'worker-test')).limit(1);
+  userId = row!.id;
+}
 
 async function reset(): Promise<void> {
   await db.execute(
@@ -70,9 +126,11 @@ async function insertJob(opts: {
   maxAttempts?: number;
   ruleId?: string | null;
 }): Promise<{ id: string }> {
+  await ensureOwner();
   const [row] = await db
     .insert(notificationJobs)
     .values({
+      userId,
       ruleId: opts.ruleId ?? null,
       subjectType: 'event',
       subjectId: crypto.randomUUID(),
@@ -110,7 +168,7 @@ async function forceDue(id: string): Promise<void> {
 
 beforeEach(async () => {
   await reset();
-  withCredentials();
+  await bindAccount();
   fetchCalls = 0;
   responder = () => jsonResponse({ ret: 0 });
   globalThis.fetch = (async () => {
@@ -128,6 +186,8 @@ afterEach(async () => {
 });
 
 after(async () => {
+  // 本文件写入的是"可发送"绑定：留着它会让同库其他测试把它算成可发送账号
+  await unbindAccount();
   await pool.end();
 });
 
@@ -305,7 +365,7 @@ describe('A1 并发领取不重复', () => {
   it('两个并发领取同一任务，合计只领取一次且 attempts 只加一', async () => {
     const job = await insertJob({ fireAt: new Date(Date.now() - 1000), key: 'a1-concurrent' });
 
-    const [a, b] = await Promise.all([claimDueJobs(), claimDueJobs()]);
+    const [a, b] = await Promise.all([claimDueJobs([userId]), claimDueJobs([userId])]);
     assert.equal(a.length + b.length, 1, '同一任务只能被一个领取者拿到');
 
     const row = await getJob(job.id);
@@ -316,7 +376,7 @@ describe('A1 并发领取不重复', () => {
 
 describe('A7 未配置渠道 / 错过阈值 / 渠道恢复', () => {
   it('渠道未配置时不领取任务：不消费、不记尝试、不发请求', async () => {
-    withoutCredentials();
+    await unbindAccount();
     const job = await insertJob({ fireAt: new Date(Date.now() - 1000), key: 'a7-unconfigured' });
 
     const result = await tick();
@@ -330,8 +390,8 @@ describe('A7 未配置渠道 / 错过阈值 / 渠道恢复', () => {
     assert.equal(await countAttempts(job.id), 0);
   });
 
-  it('未配置且已超过错过阈值 → 标记 missed 并写明"通道未配置"原因', async () => {
-    withoutCredentials();
+  it('未绑定微信且已超过错过阈值 → 标记 missed 并写明"该账号尚未绑定微信"的原因', async () => {
+    await unbindAccount();
     const job = await insertJob({ fireAt: new Date(Date.now() - 3 * 3600 * 1000), key: 'a7-missed' });
 
     const result = await tick();
@@ -339,13 +399,15 @@ describe('A7 未配置渠道 / 错过阈值 / 渠道恢复', () => {
 
     assert.equal(result.missed, 1);
     assert.equal(row.status, 'missed');
-    assert.match(row.lastError ?? '', /未配置/);
+    // 多用户下原因必须逐账号说清楚："没绑微信"与"服务中断"是不同的处置线索，
+    // 因此文案从改造前的"通道未配置"改为"该账号尚未绑定微信"
+    assert.match(row.lastError ?? '', /尚未绑定微信/);
     assert.match(row.lastError ?? '', /不补发/);
     assert.equal(fetchCalls, 0);
   });
 
   it('刚到期但未超阈值 → 保持 pending，不被误标 missed', async () => {
-    withoutCredentials();
+    await unbindAccount();
     const job = await insertJob({ fireAt: new Date(Date.now() - 60_000), key: 'a7-just-due' });
 
     await tick();
@@ -354,15 +416,15 @@ describe('A7 未配置渠道 / 错过阈值 / 渠道恢复', () => {
     assert.equal(row.attempts, 0);
   });
 
-  it('渠道恢复后（补上凭据，无需重启）同一任务被正常发送', async () => {
-    withoutCredentials();
+  it('渠道恢复后（该账号补上可发送绑定，无需重启）同一任务被正常发送', async () => {
+    await unbindAccount();
     const job = await insertJob({ fireAt: new Date(Date.now() - 60_000), key: 'a7-recovery' });
 
     await tick();
     assert.equal((await getJob(job.id)).status, 'pending');
 
-    // 补上凭据 = 运维在 .env 填写 ILINK_*
-    withCredentials();
+    // 补上绑定 = 该账号完成扫码绑定并已收到一条消息（有上下文），写出一行可发送状态
+    await bindAccount();
     responder = () => jsonResponse({ ret: 0 });
     await tick();
 
@@ -373,7 +435,7 @@ describe('A7 未配置渠道 / 错过阈值 / 渠道恢复', () => {
   });
 
   it('已配置渠道下超阈值的任务同样标 missed 并写明原因（服务中断场景）', async () => {
-    withCredentials();
+    await bindAccount();
     const job = await insertJob({ fireAt: new Date(Date.now() - 3 * 3600 * 1000), key: 'a7-outage' });
 
     await tick();
