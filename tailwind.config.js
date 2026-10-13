@@ -7,16 +7,16 @@ export default {
       colors: {
         // 语义色：事件=蓝、待办=绿、订阅=琥珀（PRD 3.2）
         event: {
-          DEFAULT: '#3b82f6',
-          soft: 'rgb(59 130 246 / 0.12)',
+          DEFAULT: 'rgb(var(--event) / <alpha-value>)',
+          soft: 'rgb(var(--event) / 0.10)',
         },
         task: {
-          DEFAULT: '#10b981',
-          soft: 'rgb(16 185 129 / 0.12)',
+          DEFAULT: 'rgb(var(--task) / <alpha-value>)',
+          soft: 'rgb(var(--task) / 0.10)',
         },
         subscription: {
-          DEFAULT: '#f59e0b',
-          soft: 'rgb(245 158 11 / 0.12)',
+          DEFAULT: 'rgb(var(--subscription) / <alpha-value>)',
+          soft: 'rgb(var(--subscription) / 0.10)',
         },
         surface: 'rgb(var(--surface) / <alpha-value>)',
         canvas: 'rgb(var(--canvas) / <alpha-value>)',
@@ -24,8 +24,8 @@ export default {
         ink: 'rgb(var(--ink) / <alpha-value>)',
         muted: 'rgb(var(--muted) / <alpha-value>)',
         brand: {
-          DEFAULT: '#6366f1',
-          hover: '#4f46e5',
+          DEFAULT: 'rgb(var(--brand) / <alpha-value>)',
+          hover: 'rgb(var(--brand-hover) / <alpha-value>)',
         },
       },
       fontFamily: {
@@ -40,11 +40,11 @@ export default {
         ],
       },
       borderRadius: {
-        xl: '0.875rem',
-        '2xl': '1.125rem',
+        xl: '0.625rem',
+        '2xl': '0.875rem',
       },
       boxShadow: {
-        card: '0 1px 2px rgb(0 0 0 / 0.04), 0 1px 3px rgb(0 0 0 / 0.06)',
+        card: '0 2px 6px rgb(20 35 28 / 0.025)',
         pop: '0 8px 32px rgb(0 0 0 / 0.12)',
       },
     },

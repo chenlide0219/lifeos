@@ -1,49 +1,34 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
-
 const STORAGE_KEY = 'lifeos.theme';
-
-function systemPrefersDark(): boolean {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+const CHANGE = 'lifeos-theme-change';
+let fallback: ThemeMode = 'system';
+function read(): ThemeMode {
+  try {
+    const value = localStorage.getItem(STORAGE_KEY);
+    return value === 'light' || value === 'dark' || value === 'system' ? value : fallback;
+  } catch { return fallback; }
 }
-
-function apply(mode: ThemeMode): void {
-  const dark = mode === 'dark' || (mode === 'system' && systemPrefersDark());
-  document.documentElement.classList.toggle('dark', dark);
+function subscribe(notify: () => void) {
+  window.addEventListener(CHANGE, notify);
+  window.addEventListener('storage', notify);
+  return () => { window.removeEventListener(CHANGE, notify); window.removeEventListener('storage', notify); };
 }
-
+function setMode(mode: ThemeMode) {
+  fallback = mode;
+  try { localStorage.setItem(STORAGE_KEY, mode); } catch { /* Private browser storage may be unavailable. */ }
+  window.dispatchEvent(new Event(CHANGE));
+}
 export function useTheme() {
-  const [mode, setMode] = useState<ThemeMode>(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY) as ThemeMode | null;
-      return stored ?? 'system';
-    } catch {
-      return 'system';
-    }
-  });
-
+  const mode = useSyncExternalStore(subscribe, read, () => 'system' as ThemeMode);
   useEffect(() => {
-    apply(mode);
-    try {
-      localStorage.setItem(STORAGE_KEY, mode);
-    } catch {
-      /* 隐私模式下忽略 */
-    }
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => document.documentElement.classList.toggle('dark', mode === 'dark' || (mode === 'system' && query.matches));
+    apply();
+    query.addEventListener('change', apply);
+    return () => query.removeEventListener('change', apply);
   }, [mode]);
-
-  // 跟随系统主题变化（仅 system 模式生效）
-  useEffect(() => {
-    if (mode !== 'system') return;
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = () => apply('system');
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, [mode]);
-
-  const cycle = useCallback(() => {
-    setMode((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'system' : 'light'));
-  }, []);
-
+  const cycle = useCallback(() => { const current = read(); setMode(current === 'light' ? 'dark' : current === 'dark' ? 'system' : 'light'); }, []);
   return { mode, setMode, cycle };
 }

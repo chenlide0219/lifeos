@@ -95,7 +95,7 @@ export function NotificationLog() {
               type="button"
               onClick={() => setFilter(key)}
               aria-pressed={filter === key}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+              className={`min-h-11 rounded-lg border px-3 py-1 text-xs font-medium transition-colors ${
                 filter === key ? 'border-brand/30 bg-brand/10 text-brand' : 'border-line text-muted hover:text-ink'
               }`}
             >

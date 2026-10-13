@@ -4,91 +4,108 @@
 
 @layer base {
   :root {
-    --canvas: 247 248 251;
-    --surface: 255 255 255;
-    --line: 226 232 240;
-    --ink: 15 23 42;
-    --muted: 100 116 139;
+    color-scheme: light;
+    --canvas: 246 247 244;
+    --surface: 255 255 253;
+    --line: 224 229 222;
+    --ink: 32 47 40;
+    --muted: 102 115 106;
+    --brand: 45 103 79;
+    --brand-hover: 33 82 62;
+    --event: 48 104 159;
+    --task: 45 116 82;
+    --subscription: 150 96 26;
   }
-
   .dark {
-    --canvas: 9 12 20;
-    --surface: 18 23 34;
-    --line: 38 45 60;
-    --ink: 226 232 240;
-    --muted: 148 163 184;
+    color-scheme: dark;
+    --canvas: 20 26 23;
+    --surface: 28 35 31;
+    --line: 52 64 56;
+    --ink: 231 238 231;
+    --muted: 164 179 166;
+    --brand: 102 168 134;
+    --brand-hover: 82 146 113;
+    --event: 132 182 225;
+    --task: 129 194 151;
+    --subscription: 219 177 103;
   }
-
-  html {
-    -webkit-tap-highlight-color: transparent;
-    -webkit-text-size-adjust: 100%;
-  }
-
-  body {
-    @apply bg-canvas text-ink antialiased;
-    font-feature-settings: 'tnum' 1;
-  }
-
-  /* 尊重用户的减少动效偏好（PRD 3.2：避免花哨动画） */
+  html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; scroll-padding-top: 6rem; }
+  body { @apply bg-canvas text-ink antialiased; font-feature-settings: 'tnum' 1; line-height: 1.6; }
+  ::selection { background: rgb(var(--brand) / .18); }
+  button, a, input, select, textarea { touch-action: manipulation; }
+  button, input, select, textarea { @apply disabled:cursor-not-allowed; }
+  :focus-visible { outline: 2px solid rgb(var(--brand)); outline-offset: 3px; }
+  input[type='checkbox'] { accent-color: rgb(var(--brand)); }
+  h1, h2, h3 { text-wrap: balance; }
+  p, dd { overflow-wrap: anywhere; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { @apply rounded-full bg-line; }
+  ::-webkit-scrollbar-track { background: transparent; }
   @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      transition-duration: 0.01ms !important;
-    }
-  }
-
-  ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  ::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-line;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
   }
 }
 
 @layer components {
-  .card {
-    @apply rounded-2xl border border-line bg-surface shadow-card;
-  }
+  .card { @apply min-w-0 rounded-2xl border border-line bg-surface shadow-card; }
+  .btn { @apply inline-flex min-h-11 select-none items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50; }
+  .btn-primary { @apply btn bg-brand text-white hover:bg-brand-hover; }
+  .dark .btn-primary { color: rgb(var(--canvas)); }
+  .btn-ghost { @apply btn border border-line bg-surface text-ink hover:bg-canvas; }
+  .input { @apply min-h-11 min-w-0 w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink placeholder:text-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20 disabled:opacity-60; }
+  .label { @apply mb-1.5 block text-sm font-medium text-ink; }
+  .chip { @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium; }
+  .nav-item { @apply flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted transition-colors hover:bg-canvas hover:text-ink; }
+  .nav-item-active { @apply bg-brand/10 text-brand hover:bg-brand/10 hover:text-brand; box-shadow: inset 3px 0 rgb(var(--brand)); }
+  .page-header { @apply mb-7 flex flex-wrap items-center justify-between gap-4 border-b border-line pb-6; }
+  .page-title { @apply text-2xl font-semibold tracking-tight sm:text-3xl; }
+  .page-description { @apply mt-2 max-w-xl text-sm leading-relaxed text-muted; }
+  .section-heading { @apply mb-4 flex items-start justify-between gap-3; }
+  .section-heading h2 { @apply text-[15px] font-semibold tracking-tight; }
+  .section-heading p { @apply mt-1 text-xs leading-relaxed text-muted; }
+  .filter-tabs { @apply mb-5 flex gap-1 border-b border-line pb-2; }
+  .filter-tabs button { @apply min-h-11 min-w-0 flex-1 rounded-lg px-1 py-2 text-xs font-medium transition-colors sm:flex-none sm:px-5 sm:text-sm; }
+  .filter-tabs button[aria-pressed='true'] { @apply bg-surface text-brand shadow-card; }
+  .record-list > li { @apply py-4; }
+  .record-list > li:first-child { padding-top: .25rem; }
+  .record-list > li:last-child { padding-bottom: .25rem; }
+  .row-actions { @apply flex shrink-0 gap-1; }
+  .row-actions button { @apply min-h-11 min-w-11; }
+  .metric-panel { @apply min-w-0 rounded-2xl border border-line bg-surface p-5 sm:p-6; }
+  .metric-panel:first-child { @apply border-t-2 border-t-subscription; }
+  .metric-panel:last-child { @apply border-t-2 border-t-task; }
+  .settings-jump { @apply mb-6 flex flex-wrap gap-2; }
+  .settings-jump a { @apply btn-ghost text-xs; }
+  .theme-preview { @apply mb-3 flex h-16 overflow-hidden rounded-lg border border-line; }
+  .theme-preview::before { content: ''; width: 25%; border-right: 1px solid rgb(128 128 128 / .2); background: rgb(128 128 128 / .12); }
+  .theme-preview::after { content: ''; margin: 12px; flex: 1; border-radius: 4px; border: 1px solid rgb(128 128 128 / .3); }
+  .theme-light { background: #f6f7f4; }
+  .theme-dark { background: #1c231f; }
+  .theme-system { background: linear-gradient(90deg, #f6f7f4 50%, #1c231f 50%); }
+  .calendar-panel { overflow: hidden; }
+  .calendar-panel .grid-cols-7 > button { min-width: 0; }
+  .calendar-panel .grid-cols-7 > button:nth-child(7n) { border-right: 0; }
+  .finance-filter { @apply mb-6 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-surface p-4; }
+  .finance-filter > div { @apply min-w-0 flex-1 sm:flex-none; }
+  .finance-table { @apply block overflow-x-auto; }
+  .finance-table th { @apply pb-3; }
+  .finance-table td { @apply py-3; }
+  .finance-table table { @apply w-full; }
+  .skip-link { @apply fixed left-4 top-4 z-[100] -translate-y-24 rounded-lg bg-surface px-4 py-3 text-brand shadow-pop focus:translate-y-0; }
+}
 
-  .btn {
-    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-4 py-2.5
-           text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
-  }
-
-  .btn-primary {
-    @apply btn bg-brand text-white hover:bg-brand-hover;
-  }
-
-  .btn-ghost {
-    @apply btn border border-line bg-surface text-ink hover:bg-canvas;
-  }
-
-  .input {
-    @apply w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink
-           placeholder:text-muted/70 focus:border-brand focus:outline-none focus:ring-2
-           focus:ring-brand/20 disabled:opacity-60;
-  }
-
-  .label {
-    @apply mb-1.5 block text-sm font-medium text-ink;
-  }
-
-  .chip {
-    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium;
-  }
-
-  .nav-item {
-    @apply flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted
-           transition-colors hover:bg-canvas hover:text-ink;
-  }
-
-  .nav-item-active {
-    @apply bg-brand/10 text-brand hover:bg-brand/10 hover:text-brand;
-  }
+[role='dialog'] { border: 1px solid rgb(var(--line)); padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); animation: dialog-enter 150ms ease-out; }
+@keyframes dialog-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 639px) {
+  .input { font-size: 16px; }
+  .page-header { align-items: flex-start; gap: 1rem; }
+  .page-header > div:first-child { width: 100%; }
+  .page-header > .page-actions { width: 100%; }
+  .page-actions > div { flex-wrap: wrap; }
+  .finance-filter { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .finance-filter > button { grid-column: 1 / -1; }
+  .row-actions { flex-wrap: wrap; }
+  .record-list .mobile-record { flex-wrap: wrap; }
+  .mobile-record > .row-actions { margin-left: auto; }
+  [role='dialog'] { max-height: 90dvh; }
 }

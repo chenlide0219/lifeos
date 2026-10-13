@@ -142,7 +142,7 @@ export function EventsPage() {
         }
       />
 
-      <div className="mb-4 flex gap-1 overflow-x-auto rounded-xl border border-line bg-surface p-1">
+      <div className="filter-tabs">
         {TABS.map(({ key, label }) => (
           <button
             key={key}
@@ -158,7 +158,7 @@ export function EventsPage() {
 
       {error ? <div className="mb-4"><Alert>{error}</Alert></div> : null}
 
-      <Card>
+      <Card title={TABS.find((item) => item.key === tab)?.label} subtitle={`${shown.length} 项事件`}>
         {loading && events.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted"><Spinner /> 读取中…</div>
         ) : shown.length === 0 ? (
@@ -168,7 +168,7 @@ export function EventsPage() {
             description={tab === 'all' || tab === 'today' || tab === 'upcoming' ? '点击「新增事件」安排一件事。' : undefined}
           />
         ) : (
-          <ul className="divide-y divide-line">
+          <ul className="record-list divide-y divide-line">
             {shown.map((event) => (
               <li key={event.id} className="py-3 first:pt-0 last:pb-0">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -182,7 +182,7 @@ export function EventsPage() {
                     </p>
                     {event.location ? <p className="mt-1 break-words text-xs text-muted">地点：{event.location}</p> : null}
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
+                  <div className="row-actions items-center">
                     <button type="button" className="rounded-lg px-2 py-1 text-xs text-muted hover:bg-canvas hover:text-ink" disabled={detailLoadingId === event.id} onClick={() => void toggleDetail(event)}>
                       {detail?.event.id === event.id ? '收起' : '详情'}
                     </button>

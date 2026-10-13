@@ -47,7 +47,7 @@ export function AnalyticsPage() {
     <>
       <PageHeader title="统计" description="预计与实际付款分开统计，口径明确标注" />
 
-      <div className="mb-4 flex flex-wrap items-end gap-3">
+      <div className="finance-filter">
         <div>
           <label className="label" htmlFor="an-from">起始日期</label>
           <input id="an-from" type="date" className="input" value={from} onChange={(e) => setFrom(e.target.value)} />
@@ -65,13 +65,13 @@ export function AnalyticsPage() {
       {error ? <div className="mb-4"><Alert>{error}</Alert></div> : null}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card title="预计支出" subtitle="口径 A：按活跃订阅当前计费规则推算，尚未发生">
+        <Card className="border-t-2 border-t-subscription" title="预计支出" subtitle="口径 A：按活跃订阅当前计费规则推算，尚未发生">
           {!summary ? (
             <div className="flex items-center gap-2 py-6 text-sm text-muted"><Spinner /> 读取中…</div>
           ) : summary.expected.length === 0 ? (
             <EmptyState icon={<IconAnalytics width={28} height={28} />} title="暂无待确认的预计账单" description="新增订阅后，未来 12 个月的预计账单会显示在这里。" />
           ) : (
-            <ul className="space-y-2">
+            <ul className="space-y-4">
               {summary.expected.map((e) => (
                 <li key={e.currency} className="flex items-baseline justify-between gap-3">
                   <span className="text-sm text-muted">{e.count} 笔待确认</span>
@@ -84,13 +84,13 @@ export function AnalyticsPage() {
           )}
         </Card>
 
-        <Card title="实际净支出" subtitle="口径 B：已确认付款扣除退款">
+        <Card className="border-t-2 border-t-task" title="实际净支出" subtitle="口径 B：已确认付款扣除退款">
           {!summary ? (
             <div className="flex items-center gap-2 py-6 text-sm text-muted"><Spinner /> 读取中…</div>
           ) : summary.actualNet.length === 0 ? (
             <EmptyState icon={<IconAnalytics width={28} height={28} />} title="还没有实际付款" description="在订阅页确认预计账单，或手动记账后，这里会显示净支出。" />
           ) : (
-            <table className="w-full text-sm">
+            <div className="finance-table"><table className="w-full text-sm">
               <thead>
                 <tr className="text-xs text-muted">
                   <th className="text-left font-medium">币种</th>
@@ -109,7 +109,7 @@ export function AnalyticsPage() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           )}
         </Card>
       </div>
@@ -118,17 +118,17 @@ export function AnalyticsPage() {
         {!summary || summary.byMonth.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted">暂无数据</p>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-4">
             {summary.byMonth.map((m) => (
               <li key={`${m.month}-${m.currency}`} className="flex items-center gap-3">
                 <span className="w-20 shrink-0 text-xs text-muted">{m.month}</span>
-                <span className="h-2.5 flex-1 overflow-hidden rounded-full bg-canvas">
+                <span className="h-3 flex-1 overflow-hidden rounded-full bg-canvas">
                   <span
                     className={`block h-full rounded-full ${Number(m.net) < 0 ? 'bg-subscription' : 'bg-task'}`}
                     style={{ width: `${Math.min(100, (Math.abs(Number(m.net)) / maxMonth) * 100)}%` }}
                   />
                 </span>
-                <span className="w-28 shrink-0 text-right text-xs">
+                <span className="w-24 shrink-0 text-right text-xs">
                   {m.net} <span className="text-muted">{m.currency}</span>
                 </span>
               </li>
@@ -141,7 +141,7 @@ export function AnalyticsPage() {
         {payments.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted">暂无付款记录</p>
         ) : (
-          <ul className="divide-y divide-line">
+          <ul className="record-list divide-y divide-line">
             {payments.slice(0, 30).map((p) => (
               <li key={p.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                 <div className="min-w-0 flex-1">

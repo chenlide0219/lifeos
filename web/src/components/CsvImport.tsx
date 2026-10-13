@@ -1,3 +1,4 @@
+import { useDialog } from '../hooks/useDialog';
 import { useState } from 'react';
 import { ApiError, requestRaw } from '../api';
 import { Alert, Spinner } from './ui';
@@ -59,6 +60,8 @@ export function CsvImportDialog({ open, onClose, onImported }: { open: boolean; 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
+
+  const dialogRef = useDialog(open, onClose);
 
   if (!open) return null;
 
@@ -130,7 +133,7 @@ export function CsvImportDialog({ open, onClose, onImported }: { open: boolean; 
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4">
-      <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-pop sm:rounded-2xl" role="dialog" aria-modal="true">
+      <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-pop sm:rounded-2xl" ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="导入 CSV">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold">导入 CSV</h2>
           <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={() => { reset(); onClose(); }}>

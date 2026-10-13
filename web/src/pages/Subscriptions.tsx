@@ -1,3 +1,4 @@
+import { useDialog } from '../hooks/useDialog';
 import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
@@ -273,7 +274,7 @@ export function SubscriptionsPage() {
       {notice ? <div className="mb-4"><Alert tone="info">{notice}</Alert></div> : null}
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2">
-        <div className="rounded-2xl border border-line bg-surface px-4 py-3.5">
+        <div className="metric-panel">
           <p className="text-xs font-medium text-muted">预计月均支出（口径一）</p>
           {summary && Object.keys(summary.expected.monthlyByCurrency).length > 0 ? (
             // 按币种分列：跨币种相加的数字没有意义，裸数字还会被误读为人民币
@@ -289,7 +290,7 @@ export function SubscriptionsPage() {
           )}
           <p className="mt-1 text-xs text-muted">{summary?.expected.monthlyTotalNote ?? '按当前周期折算，与实付不混算'}</p>
         </div>
-        <div className="rounded-2xl border border-line bg-surface px-4 py-3.5">
+        <div className="metric-panel">
           <p className="text-xs font-medium text-muted">实际净支出（口径二）</p>
           {summary && summary.actual.length > 0 ? (
             <ul className="mt-1 space-y-0.5">
@@ -315,19 +316,19 @@ export function SubscriptionsPage() {
         ) : mainBills.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted">没有待确认的预计账单</p>
         ) : (
-          <ul className="divide-y divide-line">
+          <ul className="record-list divide-y divide-line">
             {mainBills.map((bill) => {
               const urgency = billUrgency(bill.plannedDate, todayStr);
               return (
-                <li key={bill.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+                <li key={bill.id} className="mobile-record flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{bill.subscriptionName ?? '（订阅已删除）'}</p>
-                    <p className="mt-0.5 flex items-center gap-2 text-xs text-muted">
+                    <p className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted">
                       {bill.plannedDate} · {money(bill.amount, bill.currency)}
                       <span className={urgency.className}>{urgency.label}</span>
                     </p>
                   </div>
-                  <div className="flex shrink-0 gap-1">
+                  <div className="row-actions">
                     <button type="button" className="btn-ghost !px-2.5 !py-1 text-xs" disabled={busy} onClick={() => void skipBill(bill)}>
                       跳过
                     </button>
@@ -350,9 +351,9 @@ export function SubscriptionsPage() {
             description="新增订阅后，系统会按计费规则生成未来 12 个月的预计账单，并出现在日历中。"
           />
         ) : (
-          <ul className="divide-y divide-line">
+          <ul className="record-list divide-y divide-line">
             {list.map((sub) => (
-              <li key={sub.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+              <li key={sub.id} className="mobile-record flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
                 <button type="button" className="min-w-0 flex-1 text-left" onClick={() => void openDetail(sub.id)}>
                   <p className="truncate text-sm font-medium">{sub.name}</p>
                   <p className="mt-0.5 text-xs text-muted">
@@ -362,7 +363,7 @@ export function SubscriptionsPage() {
                     {sub.autoRenew ? '' : ' · 已关闭自动续费'}
                   </p>
                 </button>
-                <div className="flex shrink-0 gap-1">
+                <div className="row-actions">
                   <button type="button" className="rounded-lg px-2 py-1 text-xs text-muted hover:text-ink" onClick={() => setEditing(sub)}>
                     编辑
                   </button>
@@ -471,10 +472,11 @@ function SubscriptionDialog({
   onSave: () => void;
   onTimeValidityChange: (invalid: boolean) => void;
 }) {
+  const dialogRef = useDialog(true, onCancel, !busy);
   const period = value.billingPeriod ?? 'monthly';
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4">
-      <div className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-pop sm:rounded-2xl" role="dialog" aria-modal="true">
+      <div className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-pop sm:rounded-2xl" ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={value.id ? '编辑订阅' : '新增订阅'}>
         <h2 className="mb-4 text-base font-semibold">{value.id ? '编辑订阅' : '新增订阅'}</h2>
         <div className="space-y-3.5">
           <div>
@@ -539,7 +541,7 @@ function SubscriptionDialog({
 
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-line p-3.5">
             <span className="text-sm font-medium">自动续费</span>
-            <input type="checkbox" className="h-4 w-4 accent-[#6366f1]" checked={value.autoRenew ?? true} onChange={(e) => onChange({ ...value, autoRenew: e.target.checked, status: e.target.checked ? 'active' : 'auto_renew_off' })} />
+            <input type="checkbox" className="h-4 w-4 accent-brand" checked={value.autoRenew ?? true} onChange={(e) => onChange({ ...value, autoRenew: e.target.checked, status: e.target.checked ? 'active' : 'auto_renew_off' })} />
           </label>
           <p className="-mt-2 text-xs text-muted">关闭后系统不会再生成未来扣费，提醒也会改为「服务到期」</p>
 
@@ -548,7 +550,7 @@ function SubscriptionDialog({
               <span className="text-sm font-medium">微信提醒</span>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[#6366f1]"
+                className="h-4 w-4 accent-brand"
                 checked={value.reminderEnabled ?? false}
                 onChange={(e) => onChange({ ...value, reminderEnabled: e.target.checked })}
               />

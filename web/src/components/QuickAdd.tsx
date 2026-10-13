@@ -1,3 +1,4 @@
+import { useDialog } from '../hooks/useDialog';
 import { useEffect, useState, type FormEvent } from 'react';
 import {
   ApiError,
@@ -157,6 +158,8 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
     };
   }, [open, event, task, initialMode]);
 
+  const dialogRef = useDialog(open, onClose);
+
   if (!open) return null;
 
   function toggleOffset(minutes: number) {
@@ -242,7 +245,7 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4">
       <div
         className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-pop sm:rounded-2xl"
-        role="dialog"
+        ref={dialogRef} tabIndex={-1} role="dialog"
         aria-modal="true"
         aria-label={editing ? '编辑' : '新增'}
       >
@@ -398,7 +401,7 @@ export function QuickAddDialog({ open, mode: initialMode, event, task, onClose, 
               <span className="text-sm font-medium">微信提醒</span>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[#6366f1]"
+                className="h-4 w-4 accent-brand"
                 checked={reminderEnabled}
                 disabled={editing && !reminderLoaded}
                 onChange={(e) => {

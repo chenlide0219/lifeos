@@ -62,7 +62,10 @@ export function SettingsPage() {
     <>
       <PageHeader title="设置" description="账户安全、外观、模型接口与通知通道状态" />
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <nav aria-label="设置分区" className="settings-jump">
+        <a href="#account">账户与外观</a><a href="#wechat">微信与助手</a><a href="#notifications">通知记录</a><a href="#data">数据管理</a>
+      </nav>
+      <div id="account" className="grid gap-5 lg:grid-cols-2">
         <Card title="账户" subtitle={user?.username}>
           <form onSubmit={handlePasswordChange} className="space-y-3">
             <div>
@@ -146,6 +149,7 @@ export function SettingsPage() {
                       : 'border-line text-muted hover:text-ink'
                   }`}
                 >
+                  <span aria-hidden="true" className={`theme-preview ${key === 'light' ? 'theme-light' : key === 'dark' ? 'theme-dark' : 'theme-system'}`} />
                   {label}
                 </button>
               ))}
@@ -195,11 +199,11 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <div className="mt-4"><WechatBinding onChanged={() => void api.status().then(setStatus).catch(() => undefined)} /></div>
+      <div id="wechat" className="mt-6"><WechatBinding onChanged={() => void api.status().then(setStatus).catch(() => undefined)} /></div>
 
       <div className="mt-4"><AssistantStatus /></div>
 
-      <Card
+      <section id="notifications"><Card
         title="通知记录"
         subtitle="提醒任务的状态、错过原因与失败明细（结果未知的任务需人工核实手机是否已收到）"
         className="mt-4"
@@ -208,9 +212,9 @@ export function SettingsPage() {
           <TestSendPanel />
         </div>
         <NotificationLog />
-      </Card>
+      </Card></section>
 
-      <Card title="数据管理" subtitle="导出与备份" className="mt-4">
+      <section id="data"><Card title="数据管理" subtitle="导出与备份" className="mt-4">
         <div className="flex flex-wrap gap-2">
           {[
             { href: '/api/export/subscriptions.csv', label: '导出订阅 CSV' },
@@ -232,7 +236,7 @@ export function SettingsPage() {
           </li>
           <li>· 数据库每日自动加密备份并保留历史副本，策略见服务器上的备份脚本。</li>
         </ul>
-      </Card>
+      </Card></section>
     </>
   );
 }

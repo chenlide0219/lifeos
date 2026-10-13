@@ -252,13 +252,13 @@ export function CalendarPage() {
         </div>
       ) : null}
 
-      <Card className="!p-0">
+      <Card className="calendar-panel !p-0">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-4">
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" className="btn-ghost !px-3 !py-1.5" onClick={() => shift(-1)} aria-label="上一个">
               ‹
             </button>
-            <span className="min-w-[10rem] text-center text-sm font-semibold">{rangeLabel}</span>
+            <span className="min-w-0 text-center text-sm font-semibold">{rangeLabel}</span>
             <button type="button" className="btn-ghost !px-3 !py-1.5" onClick={() => shift(1)} aria-label="下一个">
               ›
             </button>
@@ -275,16 +275,16 @@ export function CalendarPage() {
             {loading ? <Spinner className="ml-1 text-muted" /> : null}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto">
             {/* 视图切换：月 / 周 / 日（PRD FR-04） */}
-            <div className="flex gap-1 rounded-xl border border-line p-0.5">
+            <div className="flex w-full gap-1 rounded-xl border border-line bg-canvas p-0.5 sm:w-auto">
               {VIEWS.map((v) => (
                 <button
                   key={v.key}
                   type="button"
                   onClick={() => setView(v.key)}
                   aria-pressed={view === v.key}
-                  className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`min-h-11 min-w-11 flex-1 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
                     view === v.key ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'
                   }`}
                 >
@@ -299,7 +299,7 @@ export function CalendarPage() {
                 type="button"
                 onClick={() => toggleFilter(key)}
                 aria-pressed={active.has(key)}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                className={`min-h-11 rounded-lg border px-3 py-1 text-xs font-medium transition-colors ${
                   active.has(key) ? 'border-brand/30 bg-brand/10 text-brand' : 'border-line text-muted hover:text-ink'
                 }`}
               >

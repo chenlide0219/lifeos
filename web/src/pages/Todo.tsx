@@ -92,7 +92,7 @@ export function TodoPage() {
     <>
       <PageHeader
         title="待办"
-        description="收件箱、今天、计划中、已完成"
+        description="清空脑中的杂事，把注意力留给眼前的行动。"
         action={
           <button
             type="button"
@@ -108,12 +108,13 @@ export function TodoPage() {
         }
       />
 
-      <div className="mb-4 flex gap-1 overflow-x-auto rounded-xl border border-line bg-surface p-1">
+      <div className="filter-tabs">
         {TABS.map(({ key, label }) => (
           <button
             key={key}
             type="button"
             onClick={() => setTab(key)}
+            aria-pressed={tab === key}
             className={`flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
               tab === key ? 'bg-brand/10 text-brand' : 'text-muted hover:text-ink'
             }`}
@@ -130,7 +131,7 @@ export function TodoPage() {
         </div>
       ) : null}
 
-      <Card>
+      <Card title={TABS.find((item) => item.key === tab)?.label} subtitle={`${tasks.length} 项待办`}>
         {loading && tasks.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted">
             <Spinner /> 读取中…
@@ -138,12 +139,12 @@ export function TodoPage() {
         ) : tasks.length === 0 ? (
           <EmptyState icon={<IconTodo width={28} height={28} />} title={EMPTY_COPY[tab].title} description={EMPTY_COPY[tab].description} />
         ) : (
-          <ul className="divide-y divide-line">
+          <ul className="record-list divide-y divide-line">
             {tasks.map((task) => (
-              <li key={task.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
+              <li key={task.id} className="mobile-record flex items-start gap-3 py-3 first:pt-0 last:pb-0">
                 <input
                   type="checkbox"
-                  className="mt-1 h-4 w-4 shrink-0 accent-[#10b981]"
+                  className="mt-1 h-6 w-6 shrink-0 accent-brand"
                   checked={task.status === 'done'}
                   disabled={busyId === task.id}
                   onChange={() => void toggleComplete(task)}
@@ -168,7 +169,7 @@ export function TodoPage() {
                   </div>
                 </div>
 
-                <div className="flex shrink-0 gap-1">
+                <div className="row-actions">
                   <button
                     type="button"
                     className="rounded-lg px-2 py-1 text-xs text-muted transition-colors hover:bg-canvas hover:text-ink"
