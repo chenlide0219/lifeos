@@ -1,6 +1,7 @@
 /**
  * 生成 PWA 所需的 PNG 图标（纯 Node zlib 实现，不引入任何图像依赖）。
  *
+ * 视觉：生活手帐风——印章红圆角方块 + 白色「生」字（与界面左上角印章标记一致）。
  * 用法：node scripts/generate-icons.mjs
  */
 import { deflateSync } from 'node:zlib';
@@ -10,7 +11,10 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = join(ROOT, 'web', 'public');
-const SS = 2; // 超采样倍数，用于抗锯齿
+const SS = 3; // 超采样倍数，用于抗锯齿
+
+/** 印章红（与 web/src/index.css 的 --brand 一致） */
+const SEAL = { r: 180, g: 69, b: 58 };
 
 const CRC_TABLE = (() => {
   const table = new Int32Array(256);
@@ -73,11 +77,37 @@ function insideRoundedRect(x, y, size, radius) {
   return dx * dx + dy * dy <= radius * radius;
 }
 
-/** 字母 L：竖条 + 横条 */
-function insideLetterL(x, y, size) {
-  const vertical = x >= size * 0.34 && x <= size * 0.43 && y >= size * 0.27 && y <= size * 0.73;
-  const horizontal = x >= size * 0.34 && x <= size * 0.68 && y >= size * 0.64 && y <= size * 0.73;
-  return vertical || horizontal;
+/**
+ * 「生」字笔画掩码（归一化 0..1 坐标）。
+ * 五笔：三横 + 中间短竖 + 长横 + 底横；结构紧凑，在小尺寸下仍可辨识。
+ */
+/**
+ * 「生」字笔画掩码（归一化 0..1 坐标）。
+ * 生 = 丿 + 三横 + 中竖，共五笔；"丿"斜度与横画间距按楷体骨架校准，
+ * 否则小尺寸下会被误认成"王"。
+ */
+const STROKES = [
+  { kind: 'h', x0: 0.46, x1: 0.72, y0: 0.285, y1: 0.36 }, // 上横（撇与竖的交点处）
+  { kind: 'h', x0: 0.3, x1: 0.84, y0: 0.45, y1: 0.525 }, // 第二横
+  { kind: 'v', x0: 0.56, x1: 0.64, y0: 0.2, y1: 0.72 }, // 中竖（略偏右，撇在左）
+  { kind: 'h', x0: 0.24, x1: 0.88, y0: 0.63, y1: 0.705 }, // 第三横
+  { kind: 'h', x0: 0.18, x1: 0.94, y0: 0.785, y1: 0.86 }, // 底横
+];
+
+/** 丿：自右上向左下斜出，越往左下越粗 */
+const PIE = { xTop: 0.55, xBot: 0.35, y0: 0.22, y1: 0.46, wTop: 0.022, wBot: 0.058 };
+
+function insideSheng(nx, ny) {
+  if (ny >= PIE.y0 && ny <= PIE.y1) {
+    const t = (ny - PIE.y0) / (PIE.y1 - PIE.y0);
+    const cx = PIE.xTop + (PIE.xBot - PIE.xTop) * t;
+    const halfW = (PIE.wTop + (PIE.wBot - PIE.wTop) * t) / 2;
+    if (Math.abs(nx - cx) <= halfW) return true;
+  }
+  for (const s of STROKES) {
+    if (nx >= s.x0 && nx <= s.x1 && ny >= s.y0 && ny <= s.y1) return true;
+  }
+  return false;
 }
 
 function renderIcon(size) {
@@ -92,7 +122,6 @@ function renderIcon(size) {
       let b = 0;
       let a = 0;
 
-      // 超采样平均
       for (let sy = 0; sy < SS; sy++) {
         for (let sx = 0; sx < SS; sx++) {
           const px = x * SS + sx + 0.5;
@@ -100,26 +129,22 @@ function renderIcon(size) {
 
           if (!insideRoundedRect(px, py, big, radius)) continue;
 
-          if (insideLetterL(px, py, big)) {
+          if (insideSheng(px / big, py / big)) {
             r += 255;
             g += 255;
             b += 255;
-            a += 255;
           } else {
-            // 对角渐变：#818cf8 → #4f46e5
-            const t = (px / big + py / big) / 2;
-            r += Math.round(129 + (79 - 129) * t);
-            g += Math.round(140 + (70 - 140) * t);
-            b += Math.round(248 + (229 - 248) * t);
-            a += 255;
+            r += SEAL.r;
+            g += SEAL.g;
+            b += SEAL.b;
           }
+          a += 255;
         }
       }
 
       const samples = SS * SS;
       const idx = (y * size + x) * 4;
       const alpha = a / samples;
-      // 按覆盖的 alpha 归一化颜色，避免边缘发暗
       const coverage = alpha / 255;
       pixels[idx] = coverage > 0 ? Math.round(r / samples / coverage) : 0;
       pixels[idx + 1] = coverage > 0 ? Math.round(g / samples / coverage) : 0;

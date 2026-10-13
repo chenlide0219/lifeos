@@ -38,10 +38,11 @@ export function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-canvas px-4 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
-          <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-brand text-lg font-bold text-white">
-            L
+          <span className="relative mx-auto mb-4 flex h-12 w-12 -rotate-6 items-center justify-center rounded-md bg-brand font-serif text-xl font-bold text-white shadow-card">
+            生
+            <span aria-hidden="true" className="tape absolute -top-2 left-1/2 h-3 w-10 -translate-x-1/2 opacity-80" />
           </span>
-          <h1 className="text-xl font-semibold tracking-tight">Life OS</h1>
+          <h1 className="font-serif text-2xl tracking-tight">Life OS</h1>
           <p className="mt-1.5 text-sm text-muted">个人生活与事务管理工作站</p>
         </div>
 
