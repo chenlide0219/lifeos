@@ -145,7 +145,7 @@ log "恢复完成，无 SQL 错误"
 REQUIRED_TABLES="users audit_logs csv_import_batches events expected_bills
 notification_attempts notification_jobs notification_rules payments sessions
 settings subscription_price_history subscriptions tasks
-wechat_inbox wechat_operations wechat_outbox"
+wechat_accounts wechat_inbox wechat_operations wechat_outbox"
 
 missing=""
 for t in $REQUIRED_TABLES; do

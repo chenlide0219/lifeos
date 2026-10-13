@@ -336,6 +336,28 @@ export type AnalyticsSummary = {
   disclaimer: string;
 };
 
+/** 账号管理（仅管理员）：不含任何凭据材料，初始密码只在创建/重置的那一次响应里出现 */
+export type ManagedUserDto = {
+  id: number;
+  username: string;
+  isAdmin: boolean;
+  disabled: boolean;
+  mustChangePassword: boolean;
+  activeSessions: number;
+  createdAt: string;
+};
+
+export type ManagedUsersResponse = {
+  users: ManagedUserDto[];
+  currentUserId: number;
+};
+
+export type ResetPasswordResponse = {
+  user: ManagedUserDto;
+  initialPassword: string;
+  notice: string;
+};
+
 export const api = {
   login: (username: string, password: string) =>
     request<AuthResponse>('/auth/login', { method: 'POST', body: { username, password } }),
@@ -349,6 +371,21 @@ export const api = {
       method: 'POST',
       body: { currentPassword, newPassword },
     }),
+
+  /** 账号列表（管理员） */
+  users: () => request<ManagedUsersResponse>('/users'),
+
+  /** 新增账号（管理员）：返回一次性初始密码，**只显示这一次** */
+  createUser: (username: string, isAdmin: boolean) =>
+    request<ResetPasswordResponse>('/users', { method: 'POST', body: { username, isAdmin } }),
+
+  disableUser: (id: number) => request<{ ok: boolean }>(`/users/${id}/disable`, { method: 'POST' }),
+
+  enableUser: (id: number) => request<{ ok: boolean }>(`/users/${id}/enable`, { method: 'POST' }),
+
+  /** 重置他人密码（管理员）：生成一次性密码并强制对方下次登录改密 */
+  resetUserPassword: (id: number) =>
+    request<ResetPasswordResponse>(`/users/${id}/reset-password`, { method: 'POST' }),
 
   health: () => request<HealthResponse>('/health'),
 

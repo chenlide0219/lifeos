@@ -16,6 +16,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { events, notificationJobs, notificationRules, tasks, wechatOperations } from '../db/schema';
 import { buildIdempotencyKey } from './scheduling';
+import { ownedBy } from './scope';
 import { enqueueReply, type TxLike } from './wechat-outbox';
 import {
   DEFAULT_OFFSETS,
@@ -92,8 +93,13 @@ function normalize(row: RawOperation): OperationRow {
   };
 }
 
-/** 当前活动创建操作（至多一条） */
-export async function loadActiveOperation(generation: string): Promise<OperationRow | null> {
+/**
+ * 当前活动创建操作（至多一条）。
+ *
+ * `userId` 同时参与过滤：代际已经是"每账号一份"，但把归属写进每条查询里，
+ * 才能让"漏 join 就跨用户泄露"这一类错误在 grep 与 review 中直接可见。
+ */
+export async function loadActiveOperation(userId: number, generation: string): Promise<OperationRow | null> {
   const [row] = await db
     .select(SELECT_COLUMNS)
     .from(wechatOperations)
@@ -101,25 +107,31 @@ export async function loadActiveOperation(generation: string): Promise<Operation
       and(
         eq(wechatOperations.bindingGeneration, generation),
         inArray(wechatOperations.status, [...ACTIVE_STATUSES]),
+        ownedBy(wechatOperations, userId),
       ),
     )
     .limit(1);
   return row ? normalize(row as RawOperation) : null;
 }
 
-/** 最近的操作记录，供 /recent 核实"是否保存成功" */
-export async function listRecentOperations(generation: string, limit = 5): Promise<OperationRow[]> {
+/** 最近的操作记录，供 /recent 核实"是否保存成功"（只属于该账号） */
+export async function listRecentOperations(
+  userId: number,
+  generation: string,
+  limit = 5,
+): Promise<OperationRow[]> {
   const rows = await db
     .select(SELECT_COLUMNS)
     .from(wechatOperations)
-    .where(eq(wechatOperations.bindingGeneration, generation))
+    .where(and(eq(wechatOperations.bindingGeneration, generation), ownedBy(wechatOperations, userId)))
     .orderBy(desc(wechatOperations.updatedAt))
     .limit(limit);
   return rows.map((r) => normalize(r as RawOperation));
 }
 
-/** 按短码定位操作（仅限该代际、且仍是活动状态） */
+/** 按短码定位操作（仅限该代际、该账号、且仍是活动状态） */
 export async function findByShortCode(
+  userId: number,
   generation: string,
   shortCode: string,
 ): Promise<OperationRow | null> {
@@ -131,6 +143,7 @@ export async function findByShortCode(
         eq(wechatOperations.bindingGeneration, generation),
         eq(wechatOperations.shortCode, shortCode),
         inArray(wechatOperations.status, [...ACTIVE_STATUSES]),
+        ownedBy(wechatOperations, userId),
       ),
     )
     .limit(1);
@@ -138,6 +151,8 @@ export async function findByShortCode(
 }
 
 export type CreateOperationInput = {
+  /** 归属账号：草稿归发消息的那个人，提交时创建的事项也落在同一个人名下 */
+  userId: number;
   bindingGeneration: string;
   kind?: 'create' | 'query';
   draftKind: DraftKind;
@@ -159,6 +174,7 @@ export async function createOperation(input: CreateOperationInput): Promise<Oper
   const rows = await db
     .insert(wechatOperations)
     .values({
+      userId: input.userId,
       bindingGeneration: input.bindingGeneration,
       kind: input.kind ?? 'create',
       draftKind: input.draftKind,
@@ -180,6 +196,8 @@ export async function createOperation(input: CreateOperationInput): Promise<Oper
 }
 
 export type UpdateOperationInput = {
+  /** 归属账号：更新必须限定在该账号内 */
+  userId: number;
   operationId: string;
   draft?: Draft;
   missingFields?: string[];
@@ -225,17 +243,29 @@ export async function updateOperation(input: UpdateOperationInput): Promise<Oper
       expiresAt: renewedExpiry(now),
       updatedAt: now,
     })
-    .where(and(eq(wechatOperations.id, input.operationId), inArray(wechatOperations.status, [...ACTIVE_STATUSES])))
+    .where(
+      and(
+        eq(wechatOperations.id, input.operationId),
+        inArray(wechatOperations.status, [...ACTIVE_STATUSES]),
+        ownedBy(wechatOperations, input.userId),
+      ),
+    )
     .returning(SELECT_COLUMNS);
   return rows[0] ? normalize(rows[0] as RawOperation) : null;
 }
 
 /** 主动取消：只放弃未保存草稿（PRD 3.4） */
-export async function cancelOperation(operationId: string, now = new Date()): Promise<boolean> {
+export async function cancelOperation(userId: number, operationId: string, now = new Date()): Promise<boolean> {
   const rows = await db
     .update(wechatOperations)
     .set({ status: 'cancelled', cancelledAt: now, updatedAt: now })
-    .where(and(eq(wechatOperations.id, operationId), inArray(wechatOperations.status, [...ACTIVE_STATUSES])))
+    .where(
+      and(
+        eq(wechatOperations.id, operationId),
+        inArray(wechatOperations.status, [...ACTIVE_STATUSES]),
+        ownedBy(wechatOperations, userId),
+      ),
+    )
     .returning({ id: wechatOperations.id });
   return rows.length > 0;
 }
@@ -243,19 +273,33 @@ export async function cancelOperation(operationId: string, now = new Date()): Pr
 /**
  * 过期（PRD 16.1-4）：由处理器在发现超期时标记，旧短码随之失效。
  *
- * 返回被过期的操作（含代际与短码），因为 **PRD 3.4 要求过期时明确提示用户**
+ * ✅ **按账号收口**（多用户改造中的一处真实缺陷）：本函数原先是一次全库扫描，
+ * 处理器每次要处理账号 A 的消息时都会顺带把**所有账号**的过期草稿标记过期，
+ * 并替他们写一条「草稿已过期」回复进 outbox。草稿过期本身不是数据泄露，
+ * 但它把"处理 A 的消息"变成了"改动 B/C 的行"——归属边界被跨过去了。
+ * 现在只扫发消息这个账号的行，过期只由"该账号自己发消息"触发。
+ *
+ * 返回被过期的操作（含账号、代际与短码），因为 **PRD 3.4 要求过期时明确提示用户**
  * "上一草稿已过期，未保存"。只改状态不通知的话，用户会在回复确认短码时
  * 只得到"短码不正确"，既不知道草稿已过期、也不知道它去了哪里。
  */
 export async function expireStaleOperations(
+  userId: number,
   now = new Date(),
-): Promise<{ id: string; bindingGeneration: string; shortCode: string | null; title: string | null }[]> {
+): Promise<{ id: string; userId: number; bindingGeneration: string; shortCode: string | null; title: string | null }[]> {
   const rows = await db
     .update(wechatOperations)
     .set({ status: 'expired', expiredAt: now, updatedAt: now })
-    .where(and(inArray(wechatOperations.status, [...ACTIVE_STATUSES]), sql`${wechatOperations.expiresAt} <= ${now.toISOString()}`))
+    .where(
+      and(
+        inArray(wechatOperations.status, [...ACTIVE_STATUSES]),
+        sql`${wechatOperations.expiresAt} <= ${now.toISOString()}`,
+        ownedBy(wechatOperations, userId),
+      ),
+    )
     .returning({
       id: wechatOperations.id,
+      userId: wechatOperations.userId,
       bindingGeneration: wechatOperations.bindingGeneration,
       shortCode: wechatOperations.shortCode,
       draft: wechatOperations.draft,
@@ -264,6 +308,7 @@ export async function expireStaleOperations(
     const draft = (r.draft as { title?: string } | null) ?? null;
     return {
       id: r.id,
+      userId: r.userId,
       bindingGeneration: r.bindingGeneration,
       shortCode: r.shortCode,
       title: typeof draft?.title === 'string' && draft.title.trim() ? draft.title : null,
@@ -271,12 +316,18 @@ export async function expireStaleOperations(
   });
 }
 
-/** 换绑/解绑：活动草稿作废（PRD 6、7.3） */
-export async function invalidateOperations(generation: string, now = new Date()): Promise<number> {
+/** 换绑/解绑：活动草稿作废（PRD 6、7.3）；只作废该账号该代际的草稿 */
+export async function invalidateOperations(userId: number, generation: string, now = new Date()): Promise<number> {
   const rows = await db
     .update(wechatOperations)
     .set({ status: 'invalidated', updatedAt: now })
-    .where(and(eq(wechatOperations.bindingGeneration, generation), inArray(wechatOperations.status, [...ACTIVE_STATUSES])))
+    .where(
+      and(
+        eq(wechatOperations.bindingGeneration, generation),
+        inArray(wechatOperations.status, [...ACTIVE_STATUSES]),
+        ownedBy(wechatOperations, userId),
+      ),
+    )
     .returning({ id: wechatOperations.id });
   return rows.length;
 }
@@ -295,8 +346,15 @@ export type CommitResult =
  *   1. `SELECT ... FOR UPDATE` 锁住该行，并发确认只有一个能通过；
  *   2. 状态必须是 `pending_confirm`，`committing`/`committed` 一律拒绝；
  *   3. 操作上的幂等键使重复调用复用同一结果。
+ *
+ * `userId` 是**发消息那个人**（由处理器从 inbox 行一路显式传下来）。
+ * 它有两个作用，缺一不可：
+ *   - 锁行时就带上 `user_id`：即使 operationId 被写错成别人的操作，这里也查不到；
+ *   - 创建 events/tasks/notification_rules 时**写入** `user_id`：事项必须落在
+ *     发消息者名下，绝不能落到别的账号或"系统"名下（这是本次改造最关键的不变量）。
  */
 export async function commitOperation(
+  userId: number,
   operationId: string,
   expectedVersion: number,
   now = new Date(),
@@ -315,7 +373,7 @@ export async function commitOperation(
     }>(sql`
       SELECT id, status, version, draft, short_code, binding_generation,
              result_subject_type, result_subject_id, idempotency_key
-      FROM wechat_operations WHERE id = ${operationId} FOR UPDATE
+      FROM wechat_operations WHERE id = ${operationId} AND user_id = ${userId} FOR UPDATE
     `);
 
     const row = locked.rows?.[0];
@@ -341,7 +399,7 @@ export async function commitOperation(
     const draft = row.draft;
     if (!draft) return { ok: false, reason: '草稿内容缺失' };
 
-    // 1) 创建事项
+    // 1) 创建事项（归属 = 发消息的人；见函数注释）
     let subjectType: 'event' | 'task';
     let subjectId: string;
 
@@ -349,6 +407,7 @@ export async function commitOperation(
       const [created] = await tx
         .insert(events)
         .values({
+          userId,
           title: draft.title,
           startAt: new Date(draft.startAt!),
           endAt: draft.endAt ? new Date(draft.endAt) : null,
@@ -363,6 +422,7 @@ export async function commitOperation(
       const [created] = await tx
         .insert(tasks)
         .values({
+          userId,
           title: draft.title,
           dueDate: draft.dueDate,
           dueTime: draft.dueTime,
@@ -375,12 +435,16 @@ export async function commitOperation(
     }
 
     // 2) 提醒规则 + 提醒任务（在同一事务内，避免"事项建好但提醒丢了"）
+    //    两张表都必须写 userId：notification_jobs 的复合外键
+    //    (rule_id, user_id) → notification_rules(id, user_id) 会用数据库挡住"规则是 A 的、
+    //    提醒任务是 B 的"这种错配；因此这里写错归属不是悄悄失效，而是整事务报错回滚。
     const offsets = effectiveOffsets(draft);
     const ruleEnabled = offsets.length > 0;
 
     const [ruleRow] = await tx
       .insert(notificationRules)
       .values({
+        userId,
         subjectType,
         subjectId,
         channel: 'wechat',
@@ -409,6 +473,7 @@ export async function commitOperation(
       await tx
         .insert(notificationJobs)
         .values({
+          userId,
           ruleId,
           subjectType,
           subjectId,
@@ -423,7 +488,7 @@ export async function commitOperation(
       createdJobs += 1;
     }
 
-    // 3) 标记操作终态
+    // 3) 标记操作终态（同样限定在该账号内）
     await tx
       .update(wechatOperations)
       .set({
@@ -433,10 +498,11 @@ export async function commitOperation(
         resultSubjectType: subjectType,
         resultSubjectId: subjectId,
       })
-      .where(eq(wechatOperations.id, operationId));
+      .where(and(eq(wechatOperations.id, operationId), ownedBy(wechatOperations, userId)));
 
     // 4) 回复入队（与上面同事务：要么都成立，要么都不成立）
     await enqueueReply(tx as unknown as TxLike, {
+      userId,
       bindingGeneration: row.binding_generation,
       operationId,
       operationVersion: row.version,

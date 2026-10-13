@@ -70,6 +70,10 @@ function toActiveView(row: OperationRow) {
 /**
  * 处理一条已领取的入站消息。
  *
+ * `message.userId` 是这条消息的**归属来源**（来自 wechat_inbox 那一行的 user_id），
+ * 本函数把它当成唯一权威：路由、草稿、查询、提交全部按它进行，
+ * **不再去查 generation 对应的账号**——多一道反查就多一次漏掉或查错的机会。
+ *
  * `inboundEnabled` 为 false 时（输入开关关闭）只推进终态，不做业务，
  * 但**主动提醒不受影响**——提醒由 notification_jobs 独立调度。
  */
@@ -80,9 +84,10 @@ export async function processInboxMessage(
   const deps = options.deps ?? productionDeps;
   const inboundEnabled = options.inboundEnabled ?? (process.env.WECHAT_INBOUND_ENABLED ?? '1') !== '0';
   const now = options.now ?? new Date();
+  const userId = message.userId;
 
   if (!inboundEnabled) {
-    await markInboxDone(message.id, null);
+    await markInboxDone(userId, message.id, null);
     return { inboxId: message.id, result: 'skipped' };
   }
 
@@ -90,9 +95,11 @@ export async function processInboxMessage(
     // 先让过期的草稿失效，避免把新消息补到一个早已过期的草稿上。
     // 过期的必须**告知用户**（PRD 3.4）：只改状态的话，用户下次回复确认短码
     // 只会得到"短码不正确"，既不知道草稿已过期、也不知道它去了哪里。
-    const expired = await expireStaleOperations(now);
+    // 只扫**这条消息所属账号**的草稿（见 expireStaleOperations 注释）。
+    const expired = await expireStaleOperations(userId, now);
     for (const item of expired) {
       await enqueueReply(db, {
+        userId: item.userId,
         bindingGeneration: item.bindingGeneration,
         operationId: item.id,
         replyType: 'expired',
@@ -105,7 +112,7 @@ export async function processInboxMessage(
       });
     }
 
-    const operation = await loadActiveOperation(message.bindingGeneration);
+    const operation = await loadActiveOperation(userId, message.bindingGeneration);
     const active = operation ? toActiveView(operation) : null;
 
     const command = parseCommand(message.text);
@@ -120,6 +127,7 @@ export async function processInboxMessage(
 
     await applyAction({
       action,
+      userId,
       generation: message.bindingGeneration,
       inboxId: message.id,
       active: operation,
@@ -128,11 +136,11 @@ export async function processInboxMessage(
       parseBasisAt: message.parseBasisAt,
     });
 
-    await markInboxDone(message.id, operation?.id ?? null);
+    await markInboxDone(userId, message.id, operation?.id ?? null);
     return { inboxId: message.id, result: 'done' };
   } catch (err) {
     const detail = (err as Error).message ?? String(err);
-    const outcome = await markInboxFailed(message.id, detail, now);
+    const outcome = await markInboxFailed(userId, message.id, detail, now);
     return { inboxId: message.id, result: outcome === 'dead' ? 'dead' : 'retry', error: detail };
   }
 }
@@ -140,6 +148,8 @@ export async function processInboxMessage(
 /** 把路由结果落成实际操作；这是唯一写库的地方 */
 async function applyAction(input: {
   action: HandlerAction;
+  /** 归属账号：来自 inbox 行，`userId` 在入参里显式传递，不从别处推导 */
+  userId: number;
   generation: string;
   inboxId: string;
   active: OperationRow | null;
@@ -147,10 +157,11 @@ async function applyAction(input: {
   deps: HandlerDeps;
   parseBasisAt: Date;
 }): Promise<void> {
-  const { action, generation, inboxId, active, now } = input;
+  const { action, generation, inboxId, active, userId, now } = input;
 
   const reply = async (replyType: string, body: string): Promise<void> => {
     await enqueueReply(db, {
+      userId,
       bindingGeneration: generation,
       sourceInboxId: inboxId,
       operationId: active?.id ?? null,
@@ -165,7 +176,7 @@ async function applyAction(input: {
   switch (action.kind) {
     case 'reply': {
       if (action.replyType === 'recent') {
-        await reply('recent', await buildRecentText(generation));
+        await reply('recent', await buildRecentText(userId, generation));
         return;
       }
       await reply(action.replyType, action.body);
@@ -173,7 +184,7 @@ async function applyAction(input: {
     }
 
     case 'query': {
-      const result = await runQuery(action.spec, now, action.draftNotice);
+      const result = await runQuery(userId, action.spec, now, action.draftNotice);
       await reply('query', result.body);
       return;
     }
@@ -181,6 +192,7 @@ async function applyAction(input: {
     case 'create_draft': {
       const shortCode = newShortCode();
       const created = await createOperation({
+        userId,
         bindingGeneration: generation,
         draftKind: action.draft.kind,
         draft: action.draft,
@@ -203,6 +215,7 @@ async function applyAction(input: {
         action.question ??
         buildPreview(action.draft, created.shortCode ?? shortCode, now);
       await enqueueReply(db, {
+        userId,
         bindingGeneration: generation,
         sourceInboxId: inboxId,
         operationId: created.id,
@@ -223,6 +236,7 @@ async function applyAction(input: {
       const { draft, dropped } = applyPatchFor(active.draft as Draft, action, input);
       const shortCode = newShortCode();
       const updated = await updateOperation({
+        userId,
         operationId: active.id,
         draft,
         missingFields: missingFields(draft),
@@ -236,6 +250,7 @@ async function applyAction(input: {
       }
       // 预览随版本变化 → 去重键带上版本，旧预览不会被这次覆盖（作废由发送前校验完成）
       await enqueueReply(db, {
+        userId,
         bindingGeneration: generation,
         sourceInboxId: inboxId,
         operationId: updated.id,
@@ -249,7 +264,7 @@ async function applyAction(input: {
     }
 
     case 'commit': {
-      const result = await commitOperation(action.operationId, action.expectedVersion, now);
+      const result = await commitOperation(userId, action.operationId, action.expectedVersion, now);
       if (!result.ok) {
         await reply('error', `${result.reason}。发送 /pending 查看当前草稿。`);
         return;
@@ -259,7 +274,7 @@ async function applyAction(input: {
     }
 
     case 'cancel': {
-      const cancelled = await cancelOperation(action.operationId, now);
+      const cancelled = await cancelOperation(userId, action.operationId, now);
       await reply(
         'cancelled',
         cancelled ? '已取消，本次未保存。' : '这个草稿已经结束，无需再取消。',
@@ -282,9 +297,9 @@ function applyPatchFor(
 }
 
 /** `/recent` 的正文：读取真实操作记录，区分已提交/已取消/已过期（PRD 3.6） */
-export async function buildRecentText(generation: string): Promise<string> {
+export async function buildRecentText(userId: number, generation: string): Promise<string> {
   const { listRecentOperations } = await import('./wechat-operations');
-  const rows = await listRecentOperations(generation, 5);
+  const rows = await listRecentOperations(userId, generation, 5);
   if (rows.length === 0) return '还没有任何操作记录。';
 
   const lines: string[] = ['【最近操作】'];

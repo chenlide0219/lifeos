@@ -1,13 +1,15 @@
 /**
- * 微信入站轮询（PRD 7.1）。
+ * 微信入站轮询（PRD 7.1，多用户版）。
  *
- * 重构要点（这是接收侧的关键改动）：
- * 原实现在**同步**的 `updateWechatState(fn)` 回调里完成"去重 + 更新上下文"，
- * 而该回调运行在一个已开启的事务中。这意味着：
- *   1. 无法在其中调用模型或使用另一个连接（会长时间占着事务）；
- *   2. 去重依赖内存里的 `seen` 数组（截断 200 条），重启即失忆、超长会漏判。
+ * 多用户下的关键变化：**没有任何"全局绑定"了**。
+ *   改造前这里只读一份全局状态、只轮询一个账号。现在必须遍历
+ *   `listBoundWechatAccounts()` 拿到的**全部已绑定账号**，逐个轮询：
+ *   每个账号用自己的 `cursor`（接收游标）、自己的 `generation`（绑定代际）、
+ *   自己的 token，消息落到**该账号自己的 `user_id`** 名下。
+ *   某个账号出错（登录过期、网络异常、凭据损坏）**只影响它自己**——
+ *   一个账号的故障不能让其他账号停止接收。
  *
- * 现在的分工是三层，各自只做一件事：
+ * 三层分工（沿用既有结构，各自只做一件事）：
  *   本文件（轮询）      → 取回消息，**只做持久化**（消息 + 游标 + 上下文同事务）；
  *   inbox-processor    → 事务外按租约领取并处理；
  *   wechat-handler     → 真正的业务路由与状态机。
@@ -16,7 +18,13 @@
  * 此外它负责**周期性维护**：回收崩溃遗留的租约、按保留期清理正文。
  */
 import { ilinkRequest } from '../server/lib/wechat-api';
-import { unseal, updateWechatState, readWechatState, type WechatCredentials } from '../server/lib/wechat-state';
+import {
+  listBoundWechatAccounts,
+  unseal,
+  updateWechatState,
+  type WechatAccount,
+  type WechatCredentials,
+} from '../server/lib/wechat-state';
 import {
   fingerprintOf,
   persistInbound,
@@ -31,15 +39,36 @@ import { sendPendingReplies } from './outbox-sender';
 /** 每轮处理多少条入站消息 */
 const INBOX_BATCH_SIZE = Number(process.env.WECHAT_INBOX_BATCH ?? 5);
 
-export type PollOutcome = {
-  /** 是否处于已绑定状态（未绑定时不轮询，也不算错误） */
-  bound: boolean;
+/** 单个账号一轮轮询的结果：异常被隔离在这里，不向上抛 */
+export type AccountPollOutcome = {
+  userId: number;
+  /** 是否真的向上游发起了轮询（已绑定且凭据可解密） */
+  polled: boolean;
   /** 入库的新消息数 */
   inserted: number;
   /** 被去重挡下的条数 */
   duplicated: number;
-  /** 上游返回的业务错误（已写入 listenerError） */
+  /** 上游返回的业务错误（已写入该账号的 listenerError） */
   upstreamError: string | null;
+  /** 本账号本轮抛出的异常（已隔离，不影响其他账号） */
+  failure: string | null;
+};
+
+export type PollOutcome = {
+  /** 已绑定并参与轮询的账号数 */
+  accounts: number;
+  /** 至少有一个账号被轮询（无任何绑定账号时为 false，不算错误） */
+  bound: boolean;
+  /** 本轮全部账号合计入库的新消息数 */
+  inserted: number;
+  /** 本轮全部账号合计被去重挡下的条数 */
+  duplicated: number;
+  /** 第一条上游业务错误（摘要）；逐账号明细见 perAccount */
+  upstreamError: string | null;
+  /** 逐账号异常摘要（形如「账号 #3：登录已过期」），供心跳日志与排查 */
+  failures: string[];
+  /** 逐账号明细 */
+  perAccount: AccountPollOutcome[];
 };
 
 /** 上游业务错误码判定：ret/errcode 任一非 0 即为拒绝 */
@@ -137,32 +166,64 @@ function extractTextFromMessage(message: Record<string, unknown>): string | null
 }
 
 /**
- * 轮询一次。
+ * 记录**该账号自己**的接收侧错误。
+ *
+ * 必须带代际与"仍绑定"两道校验：轮询期间可能发生换绑/解绑，
+ * 那时这条错误属于旧代际，不得写到新一轮绑定上（与改造前同一防线）。
+ */
+async function markListenerError(account: WechatAccount, message: string): Promise<void> {
+  await updateWechatState(account.userId, (s) => {
+    if (s.generation !== account.generation || !s.account) return;
+    s.listenerError = message;
+  });
+}
+
+/**
+ * 轮询**一个账号**。
  *
  * 事务内只做数据库操作；网络请求全部在事务之外完成。
- * 只有**绑定用户本人的文本消息**会刷新上下文（其余消息只推进游标）。
+ * 只有**该账号绑定用户本人的文本消息**会刷新它自己的上下文（其余消息只推进游标）。
+ * 抛出的异常由调用方按账号隔离。
  */
-export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutcome> {
-  const initial = await readWechatState();
-  if (!initial.account) return { bound: false, inserted: 0, duplicated: 0, upstreamError: null };
+async function pollAccountUpdates(account: WechatAccount, signal?: AbortSignal): Promise<AccountPollOutcome> {
+  const empty: AccountPollOutcome = {
+    userId: account.userId,
+    polled: false,
+    inserted: 0,
+    duplicated: 0,
+    upstreamError: null,
+    failure: null,
+  };
+  // listBoundWechatAccounts 只返回已绑定的行；这里是防御性检查
+  if (!account.account) return empty;
 
-  const account = unseal<WechatCredentials>(initial.account);
-  const data = await ilinkRequest(account.baseUrl, 'ilink/bot/getupdates', {
-    token: account.token,
-    body: { get_updates_buf: initial.cursor, base_info: { channel_version: '0.1.0' } },
+  let credentials: WechatCredentials;
+  try {
+    credentials = unseal<WechatCredentials>(account.account);
+  } catch {
+    // 凭据损坏：只影响这个账号，且不向上游发请求（发了也只会被拒）
+    await markListenerError(account, 'WECHAT_CREDENTIAL_ERROR: 凭据无法解密，请重新扫码绑定');
+    return { ...empty, failure: '凭据无法解密，需重新扫码绑定' };
+  }
+
+  // 用**该账号自己的** token 与游标轮询（游标每账号独立推进）
+  const data = await ilinkRequest(credentials.baseUrl, 'ilink/bot/getupdates', {
+    token: credentials.token,
+    body: { get_updates_buf: account.cursor, base_info: { channel_version: '0.1.0' } },
     signal,
     timeout: 30_000,
   });
 
   const upstreamError = upstreamErrorOf(data);
   if (upstreamError) {
-    await updateWechatState((s) => {
-      if (s.generation !== initial.generation || !s.account) return;
+    // 上游业务错误只暂停/标记**这个账号**：登录过期不影响其他账号的接收
+    await updateWechatState(account.userId, (s) => {
+      if (s.generation !== account.generation || !s.account) return;
       s.listenerAt = Date.now();
       s.listenerError = upstreamError;
       if (upstreamError === '登录已过期') s.pausedReason = 'login_expired';
     });
-    return { bound: true, inserted: 0, duplicated: 0, upstreamError };
+    return { ...empty, polled: true, upstreamError };
   }
 
   const candidates = collectMessages(data);
@@ -173,7 +234,7 @@ export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutco
   let unparsableText = 0;
   for (const candidate of candidates) {
     const isTextFromBoundUser =
-      Number(candidate.message_type ?? 0) === 1 && candidate.from_user_id === account.userId;
+      Number(candidate.message_type ?? 0) === 1 && candidate.from_user_id === credentials.userId;
     const message = toInbound(candidate);
     if (message) {
       inbound.push(message);
@@ -183,36 +244,84 @@ export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutco
   }
 
   // 上下文取**最后一条**有效消息的 token（时间已排序）
-  const lastWithContext = [...inbound]
-    .reverse()
-    .find((m) => m.fromUserId === account.userId && m.contextToken);
+  const lastWithContext = [...inbound].reverse().find((m) => m.fromUserId === credentials.userId && m.contextToken);
   const cursor = typeof data.get_updates_buf === 'string' && data.get_updates_buf ? data.get_updates_buf : null;
   const receivedAt = new Date();
 
+  // 消息与"该账号的游标 + 上下文"在同一事务内提交，并且带上归属账号：
+  // 入站侧是唯一能确定归属的地方，后续处理链只从行上读 userId
   const result = await persistInbound({
-    generation: initial.generation,
+    userId: account.userId,
+    generation: account.generation,
     messages: inbound,
     receivedAt,
     cursor,
     context: lastWithContext?.contextToken
       ? { token: lastWithContext.contextToken, at: receivedAt, providerTimeMs: lastWithContext.providerTimeMs }
       : null,
-    boundUserId: account.userId,
+    boundUserId: credentials.userId,
   });
 
   if (unparsableText > 0) {
-    await updateWechatState((s) => {
-      if (s.generation !== initial.generation || !s.account) return;
+    await updateWechatState(account.userId, (s) => {
+      if (s.generation !== account.generation || !s.account) return;
       s.listenerError = `收到 ${unparsableText} 条无法解析正文的文本消息，可能上游载荷格式有变化`;
     });
   }
 
   return {
-    bound: true,
+    ...empty,
+    polled: true,
     inserted: result.inserted,
     duplicated: result.duplicated,
     upstreamError: unparsableText > 0 ? `有 ${unparsableText} 条文本消息无法解析正文` : null,
   };
+}
+
+/**
+ * 轮询一次**所有已绑定账号**。
+ *
+ * 单账号失败在这里被隔离：网络异常/上游错误只记在该账号自己的状态上，
+ * 循环继续处理下一个账号。因此一个账号登录过期不会让别人的提醒停止接收。
+ */
+export async function pollWechatUpdates(signal?: AbortSignal): Promise<PollOutcome> {
+  const accounts = await listBoundWechatAccounts();
+  const outcome: PollOutcome = {
+    accounts: accounts.length,
+    bound: accounts.length > 0,
+    inserted: 0,
+    duplicated: 0,
+    upstreamError: null,
+    failures: [],
+    perAccount: [],
+  };
+
+  for (const account of accounts) {
+    let per: AccountPollOutcome;
+    try {
+      per = await pollAccountUpdates(account, signal);
+    } catch (err) {
+      const message = (err as Error).message ?? String(err);
+      per = {
+        userId: account.userId,
+        polled: true,
+        inserted: 0,
+        duplicated: 0,
+        upstreamError: null,
+        failure: message,
+      };
+      await markListenerError(account, '微信接收连接异常，正在重试').catch(() => undefined);
+    }
+
+    outcome.perAccount.push(per);
+    outcome.inserted += per.inserted;
+    outcome.duplicated += per.duplicated;
+    if (!outcome.upstreamError && per.upstreamError) outcome.upstreamError = per.upstreamError;
+    const problem = per.failure ?? per.upstreamError;
+    if (problem) outcome.failures.push(`账号 #${account.userId}：${problem}`);
+  }
+
+  return outcome;
 }
 
 /**
@@ -238,7 +347,7 @@ export function startWechatListener(): () => Promise<void> {
 
   const running = (async () => {
     // 心跳：接收循环本身没有日志，出问题时无法从日志判断"到底在不在轮询"。
-    // 每 5 分钟打一条摘要，便于真机排查（默认关闭以外的细节不打印，避免刷屏）。
+    // 每 5 分钟打一条摘要（含逐账号异常），便于真机排查。
     const HEARTBEAT_MS = 5 * 60_000;
     /** 维护任务（租约回收 + 正文清理）间隔；不必每轮都做 */
     const MAINTENANCE_MS = 10 * 60_000;
@@ -256,22 +365,24 @@ export function startWechatListener(): () => Promise<void> {
         if (!outcome.bound) {
           if (Date.now() - lastHeartbeat > HEARTBEAT_MS) {
             lastHeartbeat = Date.now();
-            console.log('[worker] 微信接收：尚未绑定，未轮询');
+            console.log('[worker] 微信接收：没有任何账号绑定微信，未轮询');
           }
         } else if (Date.now() - lastHeartbeat > HEARTBEAT_MS) {
           lastHeartbeat = Date.now();
+          // 逐账号异常必须出现在心跳里：否则"某个账号一直收不到消息"
+          // 在日志上表现为一切正常，只能靠翻库发现。
+          const problems = outcome.failures.length > 0 ? `；${outcome.failures.join('；')}` : '';
           console.log(
-            `[worker] 微信接收心跳：轮询 ${rounds} 次，本轮新入站 ${insertedTotal} 条` +
-              (outcome.upstreamError ? `，上游提示：${outcome.upstreamError}` : ''),
+            `[worker] 微信接收心跳：已绑定 ${outcome.accounts} 个账号，${rounds} 轮新增入站 ${insertedTotal} 条${problems}`,
           );
           rounds = 0;
           insertedTotal = 0;
         }
-      } catch {
+      } catch (err) {
+        // 这一层只兜住"连账号列表都拿不到"之类的整体失败（逐账号错误已在
+        // pollWechatUpdates 内按账号记录到各自的 listenerError 上）。
         if (!controller.signal.aborted) {
-          await updateWechatState((s) => {
-            s.listenerError = '微信接收连接异常，正在重试';
-          }).catch(() => undefined);
+          console.error('[worker] 微信接收轮询异常（本轮跳过，下一轮重试）:', (err as Error).message);
         }
       }
 

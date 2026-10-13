@@ -6,7 +6,7 @@
  */
 import type { PoolClient } from 'pg';
 import { pool } from '../server/db/client';
-import { hasConfiguredProvider, refreshProviders, unconfiguredDetail } from './registry';
+import { refreshProviders, wechatAccountSummary } from './registry';
 import { MISSED_AFTER_MINUTES, LEASE_MINUTES, tick, type TickContext } from './core';
 import { startWechatListener } from './wechat-listener';
 
@@ -72,18 +72,29 @@ async function main(): Promise<void> {
   /**
    * 启动横幅必须先刷新渠道状态。
    *
-   * `ManagedWechatProvider` 的内部状态初值为 `emptyWechatState()`，
-   * 而 `isConfigured()` 读的就是它；不先 `refresh()` 就判断，
-   * 即使数据库里已扫码绑定也会误报"未扫码绑定"（真实发生过的启动误导）。
-   * `refresh()` 只读设置表，无网络副作用，因此放在启动路径是安全的。
+   * `ManagedWechatProvider` 的账号快照初值是**空数组**，而 `isConfigured()` /
+   * `describe()` 读的就是它；不先 `refresh()` 就判断，即使数据库里已有账号扫码绑定
+   * 也会误报"没有任何账号绑定"（真实发生过的启动误导）。
+   * `refresh()` 只读 `wechat_accounts`，无网络副作用，因此放在启动路径是安全的。
    */
   try {
     await refreshProviders();
   } catch (err) {
     console.warn('[worker] 启动时刷新渠道状态失败，将在轮询中重试:', (err as Error).message);
   }
-  if (!hasConfiguredProvider()) {
-    console.warn(`[worker] 当前通道未配置，不会领取发送任务：${unconfiguredDetail()}`);
+
+  /**
+   * 多用户下"渠道可用"不再是一个布尔值：可能 A 可发送、B 在等上下文、C 窗口已暂停。
+   * 因此横幅逐个账号说明状态——只报一句"未配置"，管理员无法知道是谁的绑定出了问题。
+   * 注意：**能否发送由 `core.ts` 逐账号判定**，这里只做如实陈述，不做全局闸门。
+   */
+  const wechat = wechatAccountSummary();
+  console.log(`[worker] 微信通道：已绑定 ${wechat.bound} 个账号，其中 ${wechat.sendable} 个可发送`);
+  for (const account of wechat.accounts) {
+    console.log(`[worker]   账号 #${account.userId}：${account.label}`);
+  }
+  if (wechat.sendable === 0) {
+    console.warn(`[worker] 当前没有任何账号可发送，不会领取发送任务：${wechat.detail}`);
   }
 
   stopWechatListener = startWechatListener();

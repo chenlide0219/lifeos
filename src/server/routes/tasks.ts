@@ -9,6 +9,7 @@ import {
   rebuildTaskNotifications,
   upsertRule,
 } from '../lib/scheduling';
+import { ownedBy } from '../lib/scope';
 import { todayInTz } from '../lib/time';
 import {
   optBoolean,
@@ -45,6 +46,7 @@ taskRoutes.get('/', requireAuth, async (c) =>
     const viewParam = c.req.query('view') ?? 'today';
     const view: View = (VIEWS as readonly string[]).includes(viewParam) ? (viewParam as View) : 'today';
     const today = todayInTz();
+    const userId = c.get('user').id;
 
     // 「今天」= 今天到期 + 已逾期但仍未完成；「计划中」= 未来到期；
     // 「收件箱」= 没有截止日期的待办；「已完成」= done
@@ -63,7 +65,7 @@ taskRoutes.get('/', requireAuth, async (c) =>
     const rows = await db
       .select(SELECT_FIELDS)
       .from(tasks)
-      .where(conditions)
+      .where(and(conditions, ownedBy(tasks, userId)))
       .orderBy(
         // 注意：不能用 asc(sql`... NULLS LAST`) —— 那会生成 "NULLS LAST asc" 的非法顺序，
         // 方向与 NULLS 位置必须写在同一个 sql 片段里。
@@ -79,6 +81,8 @@ taskRoutes.get('/', requireAuth, async (c) =>
 taskRoutes.get('/counts', requireAuth, async (c) =>
   guard(c, async () => {
     const today = todayInTz();
+    const userId = c.get('user').id;
+    // 计数同样必须按账号过滤：只过滤列表会泄露别人的数据量
     const rows = await db
       .select({
         inbox: sql<number>`count(*) filter (where ${tasks.status} = 'todo' and ${tasks.dueDate} is null)::int`,
@@ -86,7 +90,8 @@ taskRoutes.get('/counts', requireAuth, async (c) =>
         upcoming: sql<number>`count(*) filter (where ${tasks.status} = 'todo' and ${tasks.dueDate} > ${today})::int`,
         done: sql<number>`count(*) filter (where ${tasks.status} = 'done')::int`,
       })
-      .from(tasks);
+      .from(tasks)
+      .where(ownedBy(tasks, userId));
 
     return c.json({ counts: rows[0] ?? { inbox: 0, today: 0, upcoming: 0, done: 0 }, today });
   }),
@@ -95,7 +100,12 @@ taskRoutes.get('/counts', requireAuth, async (c) =>
 taskRoutes.get('/:id', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '待办 ID');
-    const [row] = await db.select(SELECT_FIELDS).from(tasks).where(eq(tasks.id, id)).limit(1);
+    const userId = c.get('user').id;
+    const [row] = await db
+      .select(SELECT_FIELDS)
+      .from(tasks)
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
+      .limit(1);
     if (!row) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
     const reminders = await listSubjectJobs('task', id);
     // 编辑回显：返回当前提醒规则，避免编辑时静默覆盖提醒设置
@@ -109,6 +119,7 @@ taskRoutes.post('/', requireAuth, async (c) =>
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
+    const userId = c.get('user').id;
     const title = reqString(body.title, '标题');
     const dueDate = optDateString(body.dueDate, '截止日期');
     const dueTime = optTimeString(body.dueTime, '截止时刻');
@@ -129,6 +140,7 @@ taskRoutes.post('/', requireAuth, async (c) =>
     const [created] = await db
       .insert(tasks)
       .values({
+        userId,
         title,
         dueDate,
         dueTime,
@@ -149,10 +161,16 @@ taskRoutes.post('/', requireAuth, async (c) =>
 taskRoutes.patch('/:id', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '待办 ID');
+    const userId = c.get('user').id;
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
-    const [current] = await db.select(SELECT_FIELDS).from(tasks).where(eq(tasks.id, id)).limit(1);
+    // 归属条件写在同一条语句里：别人的待办与不存在的待办得到同一个 404
+    const [current] = await db
+      .select(SELECT_FIELDS)
+      .from(tasks)
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
+      .limit(1);
     if (!current) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
 
     const patch: Record<string, unknown> = { updatedAt: new Date() };
@@ -167,7 +185,11 @@ taskRoutes.patch('/:id', requireAuth, async (c) =>
       return c.json({ error: 'invalid_request', message: '填写具体时刻时必须同时填写截止日期' }, 400);
     }
 
-    const [updated] = await db.update(tasks).set(patch).where(eq(tasks.id, id)).returning(SELECT_FIELDS);
+    const [updated] = await db
+      .update(tasks)
+      .set(patch)
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
+      .returning(SELECT_FIELDS);
 
     if (body.reminderEnabled !== undefined || body.reminderOffsets !== undefined) {
       const offsets = optOffsets(body.reminderOffsets, '提醒提前量');
@@ -193,10 +215,11 @@ taskRoutes.patch('/:id', requireAuth, async (c) =>
 taskRoutes.post('/:id/complete', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '待办 ID');
+    const userId = c.get('user').id;
     const [updated] = await db
       .update(tasks)
       .set({ status: 'done', completedAt: new Date(), updatedAt: new Date() })
-      .where(eq(tasks.id, id))
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
       .returning(SELECT_FIELDS);
 
     if (!updated) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
@@ -210,10 +233,11 @@ taskRoutes.post('/:id/complete', requireAuth, async (c) =>
 taskRoutes.post('/:id/reopen', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '待办 ID');
+    const userId = c.get('user').id;
     const [updated] = await db
       .update(tasks)
       .set({ status: 'todo', completedAt: null, updatedAt: new Date() })
-      .where(eq(tasks.id, id))
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
       .returning(SELECT_FIELDS);
 
     if (!updated) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
@@ -225,10 +249,11 @@ taskRoutes.post('/:id/reopen', requireAuth, async (c) =>
 taskRoutes.post('/:id/cancel', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '待办 ID');
+    const userId = c.get('user').id;
     const [updated] = await db
       .update(tasks)
       .set({ status: 'cancelled', updatedAt: new Date() })
-      .where(eq(tasks.id, id))
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
       .returning(SELECT_FIELDS);
 
     if (!updated) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
@@ -240,11 +265,16 @@ taskRoutes.post('/:id/cancel', requireAuth, async (c) =>
 taskRoutes.delete('/:id', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '待办 ID');
-    const [existing] = await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, id)).limit(1);
+    const userId = c.get('user').id;
+    const [existing] = await db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(and(eq(tasks.id, id), ownedBy(tasks, userId)))
+      .limit(1);
     if (!existing) return c.json({ error: 'not_found', message: '待办不存在' }, 404);
 
     await purgeSubjectNotifications('task', id);
-    await db.delete(tasks).where(eq(tasks.id, id));
+    await db.delete(tasks).where(and(eq(tasks.id, id), ownedBy(tasks, userId)));
     return c.json({ ok: true });
   }),
 );

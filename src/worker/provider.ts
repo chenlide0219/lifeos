@@ -9,6 +9,11 @@
  */
 export type NotificationJobPayload = {
   jobId: string;
+  /**
+   * 归属账号。发送方必须用它解析**该账号自己**的凭据、上下文与发送窗口——
+   * 多用户下这是"绝不能把 A 的提醒用 B 的微信发出去"的关键入参。
+   */
+  userId: number;
   title: string;
   body: string;
   subjectType: string;

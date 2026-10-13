@@ -93,7 +93,7 @@ PSQL='sudo -n -u postgres psql -d lifeos -tA'
 # 表数量断言改为"必需表清单 + 下限"。
 # 原先硬编码 `= 14`，V1.1 新增三张 wechat_* 表后必然误报
 # （自检本应发现结构缺失，而不是因为**新增**表而失败）。
-REQUIRED_TABLES='users audit_logs csv_import_batches events expected_bills notification_attempts notification_jobs notification_rules payments sessions settings subscription_price_history subscriptions tasks wechat_inbox wechat_operations wechat_outbox'
+REQUIRED_TABLES='users audit_logs csv_import_batches events expected_bills notification_attempts notification_jobs notification_rules payments sessions settings subscription_price_history subscriptions tasks wechat_accounts wechat_inbox wechat_operations wechat_outbox'
 tables="$($PSQL -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null || echo '?')"
 missing_tables=''
 for t in $REQUIRED_TABLES; do
@@ -249,14 +249,57 @@ head2 '通知渠道与策略'
 prov="$($PSQL -c "SELECT count(*) FROM notification_jobs;" 2>/dev/null || echo '?')"
 ok "notification_jobs 记录数：$prov"
 
-wechat_bound="$($PSQL -c "SELECT count(*) FROM settings WHERE key='wechat.private-channel' AND coalesce(value->>'account','') <> '';" 2>/dev/null || echo '?')"
+wechat_bound="$($PSQL -c "SELECT count(*) FROM wechat_accounts WHERE account_enc IS NOT NULL;" 2>/dev/null || echo '?')"
 if [ "$wechat_bound" = '1' ]; then
-  ok '微信扫码凭据已绑定（不读取或展示 token）'
+  ok "1 个账号已绑定微信（每账号一份绑定，不读取或展示 token）"
+elif [ "$wechat_bound" != '0' ] && [ "$wechat_bound" != '?' ]; then
+  ok "$wechat_bound 个账号已绑定微信（每账号一份绑定，不读取或展示 token）"
 elif grep -q '^ILINK_TOKEN=.\+' /opt/lifeos/.env 2>/dev/null; then
-  ok 'ILINK_TOKEN 已通过旧式配置设置'
+  # 明确警告而不是当作"已配置"：环境变量通道已被移除，填了也发不出去
+  bad '没有任何账号绑定微信，但 .env 里仍配着 ILINK_TOKEN —— 该环境变量通道已在多用户改造中移除，填写它不会发出任何提醒。请到「设置 → 微信提醒」扫码绑定'
 else
-  note '微信尚未扫码绑定：Worker 不领取发送任务，超阈值将标 missed（见 BLOCKED.md）'
+  note '还没有任何账号绑定微信：Worker 只领取"绑定可用账号"的发送任务，其余超阈值将标 missed（见 BLOCKED.md）'
 fi
+
+# ── 10b. 多用户隔离不变量 ──────────────────────────────────────
+#
+# 数据隔离是本轮改造的核心承诺，必须在线上能被自检，而不是只靠"代码看起来对"。
+# 两类断言：
+#   - 每张业务表都没有"没有归属"的行；
+#   - 子表的归属与父表**一致**（复合外键保证；这里再验一次，因为它是隔离的基石）。
+head2 '多用户隔离不变量'
+OWNED_TABLES='events tasks subscriptions subscription_price_history expected_bills payments csv_import_batches notification_rules notification_jobs notification_attempts wechat_inbox wechat_operations wechat_outbox'
+orphans=''
+for t in $OWNED_TABLES; do
+  n="$($PSQL -c "SELECT count(*) FROM $t WHERE user_id IS NULL;" 2>/dev/null || echo '?')"
+  [ "$n" = '0' ] || orphans="$orphans $t($n)"
+done
+if [ -z "$orphans" ]; then
+  ok "13 张业务表全部有归属，没有 user_id 为空的行"
+else
+  bad "以下表存在没有归属的行（隔离被破坏）：$orphans"
+fi
+
+mismatch="$($PSQL -c "
+  SELECT (SELECT count(*) FROM subscription_price_history c JOIN subscriptions s ON s.id=c.subscription_id WHERE c.user_id <> s.user_id)
+       + (SELECT count(*) FROM expected_bills c JOIN subscriptions s ON s.id=c.subscription_id WHERE c.user_id <> s.user_id)
+       + (SELECT count(*) FROM notification_jobs j JOIN notification_rules r ON r.id=j.rule_id WHERE j.user_id <> r.user_id)
+       + (SELECT count(*) FROM notification_attempts a JOIN notification_jobs j ON j.id=a.job_id WHERE a.user_id <> j.user_id);
+" 2>/dev/null || echo '?')"
+[ "$mismatch" = '0' ] && ok '子表归属与父表一致（没有跨账号错配）' || bad "存在 $mismatch 行子表归属与父表不一致"
+
+legacy_state="$($PSQL -c "SELECT count(*) FROM settings WHERE key = 'wechat.private-channel';" 2>/dev/null || echo '?')"
+[ "$legacy_state" = '0' ] && ok '旧的全局微信状态行已迁移到 wechat_accounts' || bad "settings 中仍残留 $legacy_state 行旧的全局微信状态"
+
+# 按账号给出绑定概览：出问题时能直接看出是谁的绑定卡住了
+$PSQL -c "
+  SELECT u.username, COALESCE(a.account_enc IS NOT NULL, false) AS bound,
+         COALESCE(a.context_enc IS NOT NULL, false) AS has_context,
+         COALESCE(a.used, 0) AS used, COALESCE(a.paused_reason, '-') AS paused
+  FROM users u LEFT JOIN wechat_accounts a ON a.user_id = u.id ORDER BY u.id;
+" 2>/dev/null | while IFS='|' read -r name bound ctx used paused; do
+  printf '     %s：绑定=%s 上下文=%s 已用=%s 暂停=%s\n' "$name" "$bound" "$ctx" "$used" "$paused"
+done
 
 printf '\n════════════════════════════════════════════════\n'
 # ── 11. 密钥不得出现在前端构建产物（PRD FR-01 验收项）──────────

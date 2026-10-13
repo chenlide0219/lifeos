@@ -20,6 +20,7 @@ import { notificationRoutes } from './routes/notifications';
 import { statusRoutes } from './routes/status';
 import { subscriptionRoutes } from './routes/subscriptions';
 import { taskRoutes } from './routes/tasks';
+import { userRoutes } from './routes/users';
 import { voiceRoutes } from './routes/voice';
 import { wechatRoutes } from './routes/wechat';
 
@@ -62,6 +63,7 @@ export function createApp(): Hono {
 
   api.route('/health', healthRoutes);
   api.route('/auth', authRoutes);
+  api.route('/users', userRoutes);
   api.route('/status', statusRoutes);
   api.route('/notifications', notificationRoutes);
   api.route('/wechat', wechatRoutes);

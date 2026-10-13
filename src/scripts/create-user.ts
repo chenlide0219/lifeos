@@ -24,11 +24,10 @@
  * 优先用 `--password-stdin`（从管道读第一行）。
  */
 import 'dotenv/config';
-import crypto from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { db, pool } from '../server/db/client';
 import { auditLogs, sessions, users } from '../server/db/schema';
-import { checkPasswordStrength, hashPassword } from '../server/lib/password';
+import { checkPasswordStrength, generateStrongPassword, hashPassword } from '../server/lib/password';
 
 type UserRow = { id: number; username: string; is_admin: boolean; disabled_at: Date | null };
 
@@ -55,19 +54,8 @@ const USAGE = `用法:
   --update           重置密码，并强制该用户下次登录改密，同时注销其全部会话
   库中还没有任何账号时，第一个账号自动成为管理员（避免把自己锁在门外）。`;
 
-function generatePassword(): string {
-  // 保证四类字符齐全，长度 20
-  const sets = ['abcdefghijkmnopqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*-_=+'];
-  const pick = (set: string) => set[crypto.randomInt(set.length)]!;
-  const chars = sets.map(pick);
-  const all = sets.join('');
-  while (chars.length < 20) chars.push(pick(all));
-  for (let i = chars.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(i + 1);
-    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
-  }
-  return chars.join('');
-}
+// 密码生成统一走 lib（与设置页的"新增账号/重置密码"共用同一实现）
+const generatePassword = generateStrongPassword;
 
 async function readPasswordFromStdin(): Promise<string> {
   const chunks: Buffer[] = [];

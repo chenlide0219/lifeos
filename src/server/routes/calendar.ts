@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { and, eq, gte, isNotNull, lte, ne } from 'drizzle-orm';
 import { db } from '../db/client';
 import { events, expectedBills, subscriptions, tasks } from '../db/schema';
+import { ownedBy } from '../lib/scope';
 import { instantToDateString, instantToTimeString } from '../lib/time';
 import { ValidationError, optQueryInstant } from '../lib/validate';
 import { requireAuth, type AppEnv } from '../middleware/auth';
@@ -47,6 +48,8 @@ calendarRoutes.get('/', requireAuth, async (c) =>
       throw new ValidationError('查询跨度不能超过 400 天');
     }
 
+    const userId = c.get('user').id;
+
     const eventRows = await db
       .select({
         id: events.id,
@@ -57,7 +60,7 @@ calendarRoutes.get('/', requireAuth, async (c) =>
         status: events.status,
       })
       .from(events)
-      .where(and(gte(events.startAt, from), lte(events.startAt, to)))
+      .where(and(gte(events.startAt, from), lte(events.startAt, to), ownedBy(events, userId)))
       .orderBy(events.startAt)
       .limit(1000);
 
@@ -71,7 +74,7 @@ calendarRoutes.get('/', requireAuth, async (c) =>
         status: tasks.status,
       })
       .from(tasks)
-      .where(and(isNotNull(tasks.dueDate), ne(tasks.status, 'cancelled')))
+      .where(and(isNotNull(tasks.dueDate), ne(tasks.status, 'cancelled'), ownedBy(tasks, userId)))
       .orderBy(tasks.dueDate)
       .limit(1000);
 
@@ -133,11 +136,16 @@ calendarRoutes.get('/', requireAuth, async (c) =>
         subStatus: subscriptions.status,
       })
       .from(expectedBills)
-      .innerJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
+      // 联表的每一侧都要按当前账号过滤：账单属于我，它关联的订阅也必须属于我
+      .innerJoin(
+        subscriptions,
+        and(eq(subscriptions.id, expectedBills.subscriptionId), ownedBy(subscriptions, userId)),
+      )
       .where(
         and(
           gte(expectedBills.plannedDate, fromDate),
           lte(expectedBills.plannedDate, toDate),
+          ownedBy(expectedBills, userId),
           // 已取消的账单不进日历；已确认/已跳过的仍显示（历史事实）
           ne(expectedBills.status, 'cancelled'),
         ),
@@ -184,6 +192,7 @@ calendarRoutes.get('/', requireAuth, async (c) =>
           gte(subscriptions.serviceEndDate, fromDate),
           lte(subscriptions.serviceEndDate, toDate),
           ne(subscriptions.status, 'ended'),
+          ownedBy(subscriptions, userId),
         ),
       )
       .limit(200);
@@ -228,6 +237,7 @@ calendarRoutes.get('/overview', requireAuth, async (c) =>
   guard(c, async () => {
     const now = new Date();
     const today = instantToDateString(now);
+    const userId = c.get('user').id;
 
     // 今日待办 = 今天到期 + 已逾期未完成；无截止日期的待办不属于任何一天，不在这里
     const dueToday = await db
@@ -238,7 +248,14 @@ calendarRoutes.get('/overview', requireAuth, async (c) =>
         dueTime: tasks.dueTime,
       })
       .from(tasks)
-      .where(and(eq(tasks.status, 'todo'), isNotNull(tasks.dueDate), lte(tasks.dueDate, today)))
+      .where(
+        and(
+          eq(tasks.status, 'todo'),
+          isNotNull(tasks.dueDate),
+          lte(tasks.dueDate, today),
+          ownedBy(tasks, userId),
+        ),
+      )
       .orderBy(tasks.dueDate, tasks.dueTime)
       .limit(20);
 

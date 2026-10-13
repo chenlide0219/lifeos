@@ -15,6 +15,7 @@ import { and, asc, eq, gte, isNotNull, isNull, lte } from 'drizzle-orm';
 import { db } from '../db/client';
 import { events, tasks } from '../db/schema';
 import { config } from '../config';
+import { ownedBy } from './scope';
 import { addDays, instantToDateString, instantToTimeString, zonedToInstant } from './time';
 import { formatQueryReply, type GroupedQueryItems, type QueryItem } from './wechat-reply';
 
@@ -70,8 +71,13 @@ export type QueryData = {
  *
  * 事件按 `start_at` 落在区间内筛选——**按开始日归属**，因此跨天事件
  * 只在开始那天出现（PRD 16.1-3）。
+ *
+ * `userId` 是发消息那个人（处理器从 inbox 行传下来）。**本函数里每一条
+ * 对 events / tasks 的查询都必须带 `ownedBy(表, userId)`**：
+ * 微信里问"今天有什么"，返回的只能是问话人自己的日程——
+ * 这类"查询忘了过滤"是跨用户泄露里最容易发生、也最严重的一种。
  */
-export async function loadQueryData(spec: QuerySpec, now: Date): Promise<QueryData> {
+export async function loadQueryData(userId: number, spec: QuerySpec, now: Date): Promise<QueryData> {
   const range = resolveRange(spec, now);
 
   // 区间端点换算为绝对时刻：本地 00:00 到 次日 00:00（不含）
@@ -99,6 +105,7 @@ export async function loadQueryData(spec: QuerySpec, now: Date): Promise<QueryDa
           eq(events.status, 'active'),
           gte(events.startAt, fromInstant),
           lte(events.startAt, dayAfterTo),
+          ownedBy(events, userId),
         ),
       )
       .orderBy(asc(events.startAt))
@@ -131,6 +138,7 @@ export async function loadQueryData(spec: QuerySpec, now: Date): Promise<QueryDa
             eq(tasks.status, 'todo'),
             isNotNull(tasks.dueDate),
             lte(tasks.dueDate, addDays(range.fromDate, -1)),
+            ownedBy(tasks, userId),
           ),
         )
         .orderBy(asc(tasks.dueDate))
@@ -163,6 +171,7 @@ export async function loadQueryData(spec: QuerySpec, now: Date): Promise<QueryDa
           isNotNull(tasks.dueDate),
           gte(tasks.dueDate, range.fromDate),
           lte(tasks.dueDate, range.toDate),
+          ownedBy(tasks, userId),
         ),
       )
       .orderBy(asc(tasks.dueDate), asc(tasks.dueTime))
@@ -186,7 +195,7 @@ export async function loadQueryData(spec: QuerySpec, now: Date): Promise<QueryDa
     const undated = await db
       .select({ id: tasks.id, title: tasks.title })
       .from(tasks)
-      .where(and(eq(tasks.status, 'todo'), isNull(tasks.dueDate)))
+      .where(and(eq(tasks.status, 'todo'), isNull(tasks.dueDate), ownedBy(tasks, userId)))
       .orderBy(asc(tasks.createdAt))
       .limit(100);
 
@@ -209,8 +218,8 @@ export async function loadQueryData(spec: QuerySpec, now: Date): Promise<QueryDa
 }
 
 /** 组装最终回复：遵守 8 条 / 600 字与截断标注（PRD 16.2） */
-export async function runQuery(spec: QuerySpec, now: Date, draftNotice: string | null) {
-  const data = await loadQueryData(spec, now);
+export async function runQuery(userId: number, spec: QuerySpec, now: Date, draftNotice: string | null) {
+  const data = await loadQueryData(userId, spec, now);
   const result = formatQueryReply({
     title: `📅 ${data.range.title}`,
     groups: data.groups,

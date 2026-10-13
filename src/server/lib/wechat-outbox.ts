@@ -14,6 +14,7 @@
 import { and, asc, eq, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { wechatOutbox } from '../db/schema';
+import { ownedBy } from './scope';
 import { config } from '../config';
 
 /** 正文保留天数：与 inbox 一致，终态审计不随正文清理（PRD 16.1-4） */
@@ -48,6 +49,12 @@ export type TxLike = {
 };
 
 export type EnqueueInput = {
+  /**
+   * 归属账号：这条回复最终要经**该用户自己的**微信凭据发出。
+   * 入参必填（不是从 operationId 反查）：调用方本来就知道"在替谁回话"，
+   * 让它显式写出来，漏传才会在编译期暴露，而不是运行期发错人。
+   */
+  userId: number;
   bindingGeneration: string;
   operationId?: string | null;
   sourceInboxId?: string | null;
@@ -65,6 +72,7 @@ export async function enqueueReply(tx: TxLike, input: EnqueueInput): Promise<boo
   const rows = await tx
     .insert(wechatOutbox)
     .values({
+      userId: input.userId,
       bindingGeneration: input.bindingGeneration,
       operationId: input.operationId ?? null,
       sourceInboxId: input.sourceInboxId ?? null,
@@ -82,6 +90,8 @@ export async function enqueueReply(tx: TxLike, input: EnqueueInput): Promise<boo
 
 export type PendingReply = {
   id: string;
+  /** 归属账号：从 outbox 行上读出，发送侧据此取**该用户自己的**凭据与窗口 */
+  userId: number;
   bindingGeneration: string;
   operationId: string | null;
   operationVersion: number | null;
@@ -98,13 +108,33 @@ export type PendingReply = {
  *
  * 与 inbox 一样用租约而非长事务：发送是网络调用，绝不能持有事务。
  */
-export async function claimOutboxBatch(limit = 3, now = new Date()): Promise<PendingReply[]> {
+/**
+ * 领取待发送回复。
+ *
+ * `sendableUserIds` 是**可选**的：传入时只领取"所属账号当前可发送"的回复。
+ * 生产路径（`worker/outbox-sender.ts`）必须传它——否则一批里会混进不可发送账号的
+ * 回复，被领出来又只能原地交还，既浪费一轮批次，也可能把后面真正能发的回复饿死。
+ * 不传时保持跨账号领取的旧行为（仅供维护/测试使用）。
+ */
+export async function claimOutboxBatch(
+  limit = 3,
+  now = new Date(),
+  sendableUserIds?: number[],
+): Promise<PendingReply[]> {
+  // 传了集合但是空的 → 没有任何账号可发送，一条都不领（fail closed）
+  if (sendableUserIds && sendableUserIds.length === 0) return [];
+
+  // 逐个 id 作为独立参数绑定，避免把数组序列化成字符串（曾导致 malformed array literal）
+  const userFilter = sendableUserIds
+    ? sql` AND user_id IN (${sql.join(sendableUserIds.map((id) => sql`${id}`), sql`, `)})`
+    : sql``;
+
   return db.transaction(async (tx) => {
     const claimed = await tx.execute<{ id: string }>(sql`
       SELECT id FROM wechat_outbox
       WHERE status = 'pending'
         AND (next_attempt_at IS NULL OR next_attempt_at <= ${now.toISOString()})
-        AND attempts < max_attempts
+        AND attempts < max_attempts${userFilter}
       ORDER BY created_at ASC, id ASC
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
@@ -126,6 +156,7 @@ export async function claimOutboxBatch(limit = 3, now = new Date()): Promise<Pen
     return tx
       .select({
         id: wechatOutbox.id,
+        userId: wechatOutbox.userId,
         bindingGeneration: wechatOutbox.bindingGeneration,
         operationId: wechatOutbox.operationId,
         operationVersion: wechatOutbox.operationVersion,
@@ -159,25 +190,33 @@ const OUTCOME_REPLY_TYPES: ReadonlySet<string> = new Set(['created', 'cancelled'
  * 因此一条**尚未发出的预览**在提交后仍然"版本匹配"，会被当成有效回复发出去——
  * 用户会先看到「已创建」，再收到一条矛盾的「待确认 XXX」。
  * 所以命中终态操作时，只有**终态回执**仍然发送，其余一律作废。
+ *
+ * `userId` 来自被领取的 outbox 行（该回复属于谁）。查操作时一并带上它：
+ * 即使 operationId 被写错成别人的操作，也查不出来，宁可作废也不发出。
  */
 export async function isReplyStillValid(reply: {
+  userId: number;
   bindingGeneration: string;
   operationId: string | null;
   operationVersion: number | null;
   replyType?: string;
 }): Promise<{ valid: boolean; reason: string | null }> {
-  const rows = await db.execute<{ generation: string | null; account: string | null }>(sql`
-    SELECT value->>'generation' AS generation, value->>'account' AS account
-    FROM settings WHERE key = 'wechat.private-channel'
+  // 校验"该账号自己"的绑定是否仍然有效。
+  // 改造前这里读的是 settings 里那行全局状态，而迁移 0004 已把它删除：
+  // 若继续读 settings，`account` 恒为空 → 每一条回复都会被判成"尚未绑定"而 suppressed，
+  // 表现为"提醒能发、回复全丢"，且没有任何报错。
+  const rows = await db.execute<{ generation: string; account_enc: string | null }>(sql`
+    SELECT generation, account_enc FROM wechat_accounts WHERE user_id = ${reply.userId}
   `);
   const row = rows.rows?.[0];
-  if (!row?.account) return { valid: false, reason: '尚未绑定微信，回复不发送' };
+  if (!row?.account_enc) return { valid: false, reason: '尚未绑定微信，回复不发送' };
   if (row.generation !== reply.bindingGeneration) {
     return { valid: false, reason: '绑定已变更，旧回复作废' };
   }
   if (reply.operationId) {
     const opRows = await db.execute<{ version: number; status: string }>(sql`
-      SELECT version, status FROM wechat_operations WHERE id = ${reply.operationId}
+      SELECT version, status FROM wechat_operations
+      WHERE id = ${reply.operationId} AND user_id = ${reply.userId}
     `);
     const op = opRows.rows?.[0];
     if (op && reply.operationVersion !== null && op.version !== reply.operationVersion) {
@@ -196,23 +235,27 @@ export async function isReplyStillValid(reply: {
   return { valid: true, reason: null };
 }
 
-/** 标记已发送 */
-export async function markOutboxSent(id: string, now = new Date()): Promise<void> {
+/**
+ * 标记已发送。
+ *
+ * `userId` 来自被领取的 outbox 行；带上 `ownedBy` 使"改到别人的回复状态"不可能发生。
+ */
+export async function markOutboxSent(userId: number, id: string, now = new Date()): Promise<void> {
   await db
     .update(wechatOutbox)
     .set({ status: 'sent', sentAt: now, leasedUntil: null, nextAttemptAt: null, lastError: null })
-    .where(eq(wechatOutbox.id, id));
+    .where(and(eq(wechatOutbox.id, id), ownedBy(wechatOutbox, userId)));
 }
 
 /**
  * 作废（不发送）。用于过时回复：它是终态，不再重试，
  * 且**不计入已送达**，避免"以为发出去了"。
  */
-export async function markOutboxSuppressed(id: string, reason: string): Promise<void> {
+export async function markOutboxSuppressed(userId: number, id: string, reason: string): Promise<void> {
   await db
     .update(wechatOutbox)
     .set({ status: 'suppressed', leasedUntil: null, nextAttemptAt: null, lastError: reason.slice(0, 500) })
-    .where(eq(wechatOutbox.id, id));
+    .where(and(eq(wechatOutbox.id, id), ownedBy(wechatOutbox, userId)));
 }
 
 /**
@@ -222,6 +265,7 @@ export async function markOutboxSuppressed(id: string, reason: string): Promise<
  * - 明确拒绝/需人工介入 → 终止。
  */
 export async function markOutboxFailed(
+  userId: number,
   id: string,
   failureKind: 'retryable' | 'rejected' | 'needs_human' | 'unknown',
   error: string,
@@ -230,7 +274,7 @@ export async function markOutboxFailed(
   const [row] = await db
     .select({ attempts: wechatOutbox.attempts, maxAttempts: wechatOutbox.maxAttempts })
     .from(wechatOutbox)
-    .where(eq(wechatOutbox.id, id))
+    .where(and(eq(wechatOutbox.id, id), ownedBy(wechatOutbox, userId)))
     .limit(1);
   if (!row) return 'failed';
 
@@ -247,7 +291,7 @@ export async function markOutboxFailed(
         nextAttemptAt: null,
         lastError: error.slice(0, 500),
       })
-      .where(eq(wechatOutbox.id, id));
+      .where(and(eq(wechatOutbox.id, id), ownedBy(wechatOutbox, userId)));
     return 'failed';
   }
 
@@ -261,7 +305,7 @@ export async function markOutboxFailed(
       nextAttemptAt: new Date(now.getTime() + backoffMinutes * 60_000),
       lastError: error.slice(0, 500),
     })
-    .where(eq(wechatOutbox.id, id));
+    .where(and(eq(wechatOutbox.id, id), ownedBy(wechatOutbox, userId)));
   return 'pending';
 }
 
@@ -289,8 +333,13 @@ export async function purgeExpiredOutboxBodies(now = new Date()): Promise<number
   return (rows as unknown as { rowCount?: number }).rowCount ?? 0;
 }
 
-/** 供"最近操作"与设置页展示 */
-export async function listRecentReplies(limit = 10) {
+/**
+ * 供"最近操作"与设置页展示：**该账号**的最近回复。
+ *
+ * 必须按账号过滤：回复记录的正文（body）不在返回列里，但 replyType/status/lastError
+ * 足以暴露"别人发过什么、失败原因是什么"。全库取最近 N 条会把这些混进来。
+ */
+export async function listRecentReplies(userId: number, limit = 10) {
   return db
     .select({
       id: wechatOutbox.id,
@@ -303,17 +352,21 @@ export async function listRecentReplies(limit = 10) {
       lastError: wechatOutbox.lastError,
     })
     .from(wechatOutbox)
+    .where(ownedBy(wechatOutbox, userId))
     .orderBy(asc(wechatOutbox.createdAt))
     .limit(limit);
 }
 
-/** 统计各状态数量，供线上自检与设置页 */
-export async function outboxCounts(): Promise<Record<string, number>> {
-  const rows = await db.execute<{ status: string; n: number }>(sql`
-    SELECT status, count(*)::int AS n FROM wechat_outbox GROUP BY status
-  `);
+/** 统计各状态数量，供线上自检与设置页（按账号：见 listRecentReplies 的说明） */
+export async function outboxCounts(userId: number): Promise<Record<string, number>> {
+  const rows = await db
+    .select({ status: wechatOutbox.status, count: sql<number>`count(*)::int` })
+    .from(wechatOutbox)
+    .where(ownedBy(wechatOutbox, userId))
+    .groupBy(wechatOutbox.status);
+
   const out: Record<string, number> = {};
-  for (const r of rows.rows ?? []) out[r.status] = r.n;
+  for (const r of rows) out[r.status] = r.count;
   return out;
 }
 

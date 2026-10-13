@@ -29,6 +29,13 @@
       "when": 1791892784783,
       "tag": "0003_multi_user",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791893671547,
+      "tag": "0004_multi_user_isolation",
+      "breakpoints": true
     }
   ]
 }

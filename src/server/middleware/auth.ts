@@ -96,3 +96,21 @@ export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   c.set('user', user);
   await next();
 };
+
+/**
+ * 账号管理权限。**必须挂在 `requireAuth` 之后**。
+ *
+ * 注意这里返回 403 而不是 404：与"别人的业务数据"不同，账号管理端点的存在性
+ * 对已登录用户并不是秘密（设置页本来就会显示入口），这里要表达的是"你没有这个权限"，
+ * 返回 404 只会让用户以为是前端 bug。
+ */
+export const requireAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const user = c.get('user');
+  if (!user) {
+    return c.json({ error: 'unauthorized', message: '请先登录' }, 401);
+  }
+  if (!user.isAdmin) {
+    return c.json({ error: 'forbidden', message: '只有管理员可以管理账号' }, 403);
+  }
+  await next();
+};

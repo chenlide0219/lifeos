@@ -21,6 +21,7 @@ import {
 } from '../lib/billing';
 import { resolveCnyAmount } from '../lib/fx';
 import { purgeSubjectNotifications, rebuildSubscriptionNotifications } from '../lib/scheduling';
+import { ownedBy } from '../lib/scope';
 import { todayInTz } from '../lib/time';
 import {
   assertCurrency,
@@ -135,8 +136,15 @@ function readSubscriptionBody(body: Record<string, unknown>, { partial }: { part
 }
 
 /** 依据档案生成未来 12 个月预计账单；已存在同日期账单则保留（不覆盖、不删除已确认记录） */
-async function regenerateBills(subscriptionId: string): Promise<{ created: number; total: number }> {
-  const [row] = await db.select(SUB_FIELDS).from(subscriptions).where(eq(subscriptions.id, subscriptionId)).limit(1);
+async function regenerateBills(
+  subscriptionId: string,
+  userId: number,
+): Promise<{ created: number; total: number }> {
+  const [row] = await db
+    .select(SUB_FIELDS)
+    .from(subscriptions)
+    .where(and(eq(subscriptions.id, subscriptionId), ownedBy(subscriptions, userId)))
+    .limit(1);
   if (!row) throw new ValidationError('订阅不存在');
 
   const plans = generateExpectedBills(toConfig(row as unknown as Record<string, unknown>), { horizonMonths: 12 });
@@ -145,7 +153,7 @@ async function regenerateBills(subscriptionId: string): Promise<{ created: numbe
   const existing = await db
     .select({ plannedDate: expectedBills.plannedDate })
     .from(expectedBills)
-    .where(eq(expectedBills.subscriptionId, subscriptionId));
+    .where(and(eq(expectedBills.subscriptionId, subscriptionId), ownedBy(expectedBills, userId)));
   const existingDates = new Set(existing.map((e) => e.plannedDate));
 
   const toInsert = plans.filter((p) => !existingDates.has(p.plannedDate));
@@ -154,6 +162,7 @@ async function regenerateBills(subscriptionId: string): Promise<{ created: numbe
       .insert(expectedBills)
       .values(
         toInsert.map((p) => ({
+          userId,
           subscriptionId,
           plannedDate: p.plannedDate,
           amount: p.amount,
@@ -172,7 +181,13 @@ async function regenerateBills(subscriptionId: string): Promise<{ created: numbe
 
 subscriptionRoutes.get('/', requireAuth, async (c) =>
   guard(c, async () => {
-    const rows = await db.select(SUB_FIELDS).from(subscriptions).orderBy(asc(subscriptions.name)).limit(300);
+    const userId = c.get('user').id;
+    const rows = await db
+      .select(SUB_FIELDS)
+      .from(subscriptions)
+      .where(ownedBy(subscriptions, userId))
+      .orderBy(asc(subscriptions.name))
+      .limit(300);
     return c.json({
       subscriptions: rows.map((r) => ({
         ...r,
@@ -185,7 +200,8 @@ subscriptionRoutes.get('/', requireAuth, async (c) =>
 subscriptionRoutes.get('/summary', requireAuth, async (c) =>
   guard(c, async () => {
     const today = todayInTz();
-    const rows = await db.select(SUB_FIELDS).from(subscriptions);
+    const userId = c.get('user').id;
+    const rows = await db.select(SUB_FIELDS).from(subscriptions).where(ownedBy(subscriptions, userId));
 
     let expectedMonthly = 0;
     const byCurrency: Record<string, number> = {};
@@ -231,6 +247,7 @@ subscriptionRoutes.get('/summary', requireAuth, async (c) =>
         count: sql<number>`count(*)::int`,
       })
       .from(payments)
+      .where(ownedBy(payments, userId))
       .groupBy(payments.currency);
 
     return c.json({
@@ -257,26 +274,31 @@ subscriptionRoutes.get('/summary', requireAuth, async (c) =>
 subscriptionRoutes.get('/:id', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '订阅 ID');
-    const [row] = await db.select(SUB_FIELDS).from(subscriptions).where(eq(subscriptions.id, id)).limit(1);
+    const userId = c.get('user').id;
+    const [row] = await db
+      .select(SUB_FIELDS)
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, id), ownedBy(subscriptions, userId)))
+      .limit(1);
     if (!row) return c.json({ error: 'not_found', message: '订阅不存在' }, 404);
 
     const bills = await db
       .select()
       .from(expectedBills)
-      .where(eq(expectedBills.subscriptionId, id))
+      .where(and(eq(expectedBills.subscriptionId, id), ownedBy(expectedBills, userId)))
       .orderBy(asc(expectedBills.plannedDate))
       .limit(60);
 
     const history = await db
       .select()
       .from(subscriptionPriceHistory)
-      .where(eq(subscriptionPriceHistory.subscriptionId, id))
+      .where(and(eq(subscriptionPriceHistory.subscriptionId, id), ownedBy(subscriptionPriceHistory, userId)))
       .orderBy(desc(subscriptionPriceHistory.effectiveFrom));
 
     const paid = await db
       .select()
       .from(payments)
-      .where(eq(payments.subscriptionId, id))
+      .where(and(eq(payments.subscriptionId, id), ownedBy(payments, userId)))
       .orderBy(desc(payments.paidAt))
       .limit(60);
 
@@ -289,6 +311,7 @@ subscriptionRoutes.post('/', requireAuth, async (c) =>
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
+    const userId = c.get('user').id;
     const patch = readSubscriptionBody(body, { partial: false });
 
     const issues = validateBillingConfig({
@@ -305,12 +328,13 @@ subscriptionRoutes.post('/', requireAuth, async (c) =>
 
     const [created] = await db
       .insert(subscriptions)
-      .values(patch as typeof subscriptions.$inferInsert)
+      .values({ ...patch, userId } as typeof subscriptions.$inferInsert)
       .returning(SUB_FIELDS);
 
     // 首次价格写入价格历史，作为后续调价的基线
     if (created!.price) {
       await db.insert(subscriptionPriceHistory).values({
+        userId,
         subscriptionId: created!.id,
         price: created!.price,
         currency: created!.currency,
@@ -319,7 +343,7 @@ subscriptionRoutes.post('/', requireAuth, async (c) =>
       });
     }
 
-    const bills = await regenerateBills(created!.id);
+    const bills = await regenerateBills(created!.id, userId);
     // 订阅提醒：每项独立配置通知开关、提前天数与发送时刻（PRD FR-05）
     const reminder = await rebuildSubscriptionNotifications(created!.id);
     return c.json({ subscription: created, expectedBills: bills, reminder }, 201);
@@ -329,10 +353,16 @@ subscriptionRoutes.post('/', requireAuth, async (c) =>
 subscriptionRoutes.patch('/:id', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '订阅 ID');
+    const userId = c.get('user').id;
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
-    const [current] = await db.select(SUB_FIELDS).from(subscriptions).where(eq(subscriptions.id, id)).limit(1);
+    // 归属条件写在同一条语句里：别人的订阅与不存在的订阅得到同一个 404
+    const [current] = await db
+      .select(SUB_FIELDS)
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, id), ownedBy(subscriptions, userId)))
+      .limit(1);
     if (!current) return c.json({ error: 'not_found', message: '订阅不存在' }, 404);
 
     const patch = readSubscriptionBody(body, { partial: true });
@@ -356,12 +386,13 @@ subscriptionRoutes.patch('/:id', requireAuth, async (c) =>
     const [updated] = await db
       .update(subscriptions)
       .set({ ...patch, updatedAt: new Date() } as Partial<typeof subscriptions.$inferInsert>)
-      .where(eq(subscriptions.id, id))
+      .where(and(eq(subscriptions.id, id), ownedBy(subscriptions, userId)))
       .returning(SUB_FIELDS);
 
     // 调价只记历史，**不追改已发生的付款**（PRD FR-06）
     if (patch.price !== undefined && patch.price !== current.price) {
       await db.insert(subscriptionPriceHistory).values({
+        userId,
         subscriptionId: id,
         price: (patch.price as string | null) ?? '0.00',
         currency: updated!.currency,
@@ -373,8 +404,14 @@ subscriptionRoutes.patch('/:id', requireAuth, async (c) =>
     // 未确认的预计账单按新规则重算；已确认/已跳过的记录保持不变
     await db
       .delete(expectedBills)
-      .where(and(eq(expectedBills.subscriptionId, id), eq(expectedBills.status, 'expected')));
-    const bills = await regenerateBills(id);
+      .where(
+        and(
+          eq(expectedBills.subscriptionId, id),
+          eq(expectedBills.status, 'expected'),
+          ownedBy(expectedBills, userId),
+        ),
+      );
+    const bills = await regenerateBills(id, userId);
     // 扣费日或提醒设置变化后重建：旧提醒先失效，避免按旧日期发出
     const reminder = await rebuildSubscriptionNotifications(id);
 
@@ -385,13 +422,18 @@ subscriptionRoutes.patch('/:id', requireAuth, async (c) =>
 subscriptionRoutes.delete('/:id', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '订阅 ID');
-    const [existing] = await db.select({ id: subscriptions.id }).from(subscriptions).where(eq(subscriptions.id, id)).limit(1);
+    const userId = c.get('user').id;
+    const [existing] = await db
+      .select({ id: subscriptions.id })
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, id), ownedBy(subscriptions, userId)))
+      .limit(1);
     if (!existing) return c.json({ error: 'not_found', message: '订阅不存在' }, 404);
 
     // 先清理提醒（含未发送任务与规则），再删除订阅；付款记录保留（外键为 SET NULL），
     // 历史支出不得因删除订阅而消失
     await purgeSubjectNotifications('subscription', id);
-    await db.delete(subscriptions).where(eq(subscriptions.id, id));
+    await db.delete(subscriptions).where(and(eq(subscriptions.id, id), ownedBy(subscriptions, userId)));
     return c.json({ ok: true });
   }),
 );
@@ -400,8 +442,13 @@ subscriptionRoutes.delete('/:id', requireAuth, async (c) =>
 
 subscriptionRoutes.get('/bills/list', requireAuth, async (c) =>
   guard(c, async () => {
+    const userId = c.get('user').id;
     const statusParam = (c.req.query('status') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const where = statusParam.length > 0 ? inArray(expectedBills.status, statusParam) : undefined;
+    // 归属条件始终生效；状态过滤可选，两者一起组装
+    const where = and(
+      ownedBy(expectedBills, userId),
+      statusParam.length > 0 ? inArray(expectedBills.status, statusParam) : undefined,
+    );
     const nextPerSubscription = c.req.query('nextPerSubscription') === '1';
 
     const fields = {
@@ -422,13 +469,20 @@ subscriptionRoutes.get('/bills/list', requireAuth, async (c) =>
       ? await db
           .selectDistinctOn([expectedBills.subscriptionId], fields)
           .from(expectedBills)
-          .leftJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
+          // 联表的每一侧都要按当前账号过滤：账单属于我，它关联的订阅也必须属于我
+          .leftJoin(
+            subscriptions,
+            and(eq(subscriptions.id, expectedBills.subscriptionId), ownedBy(subscriptions, userId)),
+          )
           .where(where)
           .orderBy(asc(expectedBills.subscriptionId), asc(expectedBills.plannedDate))
       : await db
           .select(fields)
           .from(expectedBills)
-          .leftJoin(subscriptions, eq(subscriptions.id, expectedBills.subscriptionId))
+          .leftJoin(
+            subscriptions,
+            and(eq(subscriptions.id, expectedBills.subscriptionId), ownedBy(subscriptions, userId)),
+          )
           .where(where)
           .orderBy(asc(expectedBills.plannedDate))
           .limit(300);
@@ -444,9 +498,15 @@ subscriptionRoutes.get('/bills/list', requireAuth, async (c) =>
 subscriptionRoutes.post('/bills/:id/confirm', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '账单 ID');
+    const userId = c.get('user').id;
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
 
-    const [bill] = await db.select().from(expectedBills).where(eq(expectedBills.id, id)).limit(1);
+    // 归属条件写在同一条语句里：别人的账单与不存在的账单得到同一个 404
+    const [bill] = await db
+      .select()
+      .from(expectedBills)
+      .where(and(eq(expectedBills.id, id), ownedBy(expectedBills, userId)))
+      .limit(1);
     if (!bill) return c.json({ error: 'not_found', message: '预计账单不存在' }, 404);
 
     // 只有「预计」状态才能确认付款：已确认会重复支出，已取消/已跳过代表已决定不产生这笔支出
@@ -467,6 +527,7 @@ subscriptionRoutes.post('/bills/:id/confirm', requireAuth, async (c) =>
       const [payment] = await tx
         .insert(payments)
         .values({
+          userId,
           subscriptionId: bill.subscriptionId,
           expectedBillId: bill.id,
           paidAt,
@@ -481,14 +542,18 @@ subscriptionRoutes.post('/bills/:id/confirm', requireAuth, async (c) =>
       const [updatedBill] = await tx
         .update(expectedBills)
         .set({ status: 'confirmed', updatedAt: new Date() })
-        .where(eq(expectedBills.id, id))
+        .where(and(eq(expectedBills.id, id), ownedBy(expectedBills, userId)))
         .returning();
 
       return { payment, bill: updatedBill };
     });
 
     // 确认付款后顺延下次扣费日（仅当它正是这次账单的日期）
-    const [sub] = await db.select(SUB_FIELDS).from(subscriptions).where(eq(subscriptions.id, bill.subscriptionId)).limit(1);
+    const [sub] = await db
+      .select(SUB_FIELDS)
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, bill.subscriptionId), ownedBy(subscriptions, userId)))
+      .limit(1);
     if (sub && sub.nextBillingDate === bill.plannedDate) {
       const config = toConfig(sub as unknown as Record<string, unknown>);
       const next = generateExpectedBills({ ...config, anchorDate: bill.plannedDate, nextBillingDate: bill.plannedDate }, {
@@ -500,7 +565,7 @@ subscriptionRoutes.post('/bills/:id/confirm', requireAuth, async (c) =>
         await db
           .update(subscriptions)
           .set({ nextBillingDate: following.plannedDate, updatedAt: new Date() })
-          .where(eq(subscriptions.id, bill.subscriptionId));
+          .where(and(eq(subscriptions.id, bill.subscriptionId), ownedBy(subscriptions, userId)));
       }
     }
 
@@ -511,10 +576,17 @@ subscriptionRoutes.post('/bills/:id/confirm', requireAuth, async (c) =>
 subscriptionRoutes.post('/bills/:id/skip', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '账单 ID');
+    const userId = c.get('user').id;
     const [updated] = await db
       .update(expectedBills)
       .set({ status: 'skipped', updatedAt: new Date() })
-      .where(and(eq(expectedBills.id, id), eq(expectedBills.status, 'expected')))
+      .where(
+        and(
+          eq(expectedBills.id, id),
+          eq(expectedBills.status, 'expected'),
+          ownedBy(expectedBills, userId),
+        ),
+      )
       .returning();
     if (!updated) return c.json({ error: 'invalid_state', message: '只有预计状态的账单可以跳过' }, 409);
     return c.json({ bill: updated });
@@ -527,7 +599,9 @@ subscriptionRoutes.get('/payments/list', requireAuth, async (c) =>
   guard(c, async () => {
     const from = c.req.query('from');
     const to = c.req.query('to');
-    const conditions = [];
+    const userId = c.get('user').id;
+    // 归属条件放进同一个条件数组：列表与分页都只统计当前账号的数据
+    const conditions = [ownedBy(payments, userId)];
     if (from) conditions.push(gte(payments.paidAt, from));
     if (to) conditions.push(lte(payments.paidAt, to));
 
@@ -548,7 +622,11 @@ subscriptionRoutes.get('/payments/list', requireAuth, async (c) =>
         note: payments.note,
       })
       .from(payments)
-      .leftJoin(subscriptions, eq(subscriptions.id, payments.subscriptionId))
+      // 联表的每一侧都要按当前账号过滤：付款属于我，它关联的订阅也必须属于我
+      .leftJoin(
+        subscriptions,
+        and(eq(subscriptions.id, payments.subscriptionId), ownedBy(subscriptions, userId)),
+      )
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(payments.paidAt))
       .limit(300);
@@ -566,6 +644,7 @@ subscriptionRoutes.post('/payments', requireAuth, async (c) =>
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
+    const userId = c.get('user').id;
     const paidAt = optDateString(body.paidAt, '付款日期') ?? todayInTz();
     const amount = reqString(body.amount, '金额', 32);
     if (!Number.isFinite(Number(amount)) || Number(amount) < 0) {
@@ -577,7 +656,11 @@ subscriptionRoutes.post('/payments', requireAuth, async (c) =>
     let subscriptionId: string | null = null;
     if (body.subscriptionId) {
       subscriptionId = parseUuid(String(body.subscriptionId), '订阅 ID');
-      const [sub] = await db.select({ id: subscriptions.id }).from(subscriptions).where(eq(subscriptions.id, subscriptionId)).limit(1);
+      const [sub] = await db
+        .select({ id: subscriptions.id })
+        .from(subscriptions)
+        .where(and(eq(subscriptions.id, subscriptionId), ownedBy(subscriptions, userId)))
+        .limit(1);
       if (!sub) return c.json({ error: 'invalid_request', message: '指定的订阅不存在' }, 400);
     }
 
@@ -594,6 +677,7 @@ subscriptionRoutes.post('/payments', requireAuth, async (c) =>
     const [created] = await db
       .insert(payments)
       .values({
+        userId,
         subscriptionId,
         expectedBillId: null,
         paidAt,
@@ -618,9 +702,15 @@ subscriptionRoutes.post('/payments', requireAuth, async (c) =>
 subscriptionRoutes.post('/payments/:id/refund', requireAuth, async (c) =>
   guard(c, async () => {
     const id = parseUuid(c.req.param('id'), '付款 ID');
+    const userId = c.get('user').id;
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
 
-    const [original] = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+    // 归属条件写在同一条语句里：别人的付款与不存在的付款得到同一个 404
+    const [original] = await db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.id, id), ownedBy(payments, userId)))
+      .limit(1);
     if (!original) return c.json({ error: 'not_found', message: '付款记录不存在' }, 404);
     if (original.isRefund) return c.json({ error: 'invalid_state', message: '退款记录不能再退款' }, 409);
 
@@ -633,6 +723,7 @@ subscriptionRoutes.post('/payments/:id/refund', requireAuth, async (c) =>
     const [refund] = await db
       .insert(payments)
       .values({
+        userId,
         subscriptionId: original.subscriptionId,
         expectedBillId: null,
         paidAt: optDateString(body.paidAt, '退款日期') ?? todayInTz(),
@@ -653,7 +744,9 @@ subscriptionRoutes.get('/analytics/summary', requireAuth, async (c) =>
   guard(c, async () => {
     const from = c.req.query('from') ?? '1970-01-01';
     const to = c.req.query('to') ?? todayInTz();
+    const userId = c.get('user').id;
 
+    // 汇总同样必须按账号过滤：只过滤列表会泄露别人的金额与笔数
     const actual = await db
       .select({
         currency: payments.currency,
@@ -662,7 +755,7 @@ subscriptionRoutes.get('/analytics/summary', requireAuth, async (c) =>
         count: sql<number>`count(*)::int`,
       })
       .from(payments)
-      .where(and(gte(payments.paidAt, from), lte(payments.paidAt, to)))
+      .where(and(gte(payments.paidAt, from), lte(payments.paidAt, to), ownedBy(payments, userId)))
       .groupBy(payments.currency);
 
     const byMonth = await db
@@ -672,7 +765,7 @@ subscriptionRoutes.get('/analytics/summary', requireAuth, async (c) =>
         net: sql<string>`coalesce(sum(case when ${payments.isRefund} then -${payments.amount} else ${payments.amount} end), 0)::text`,
       })
       .from(payments)
-      .where(and(gte(payments.paidAt, from), lte(payments.paidAt, to)))
+      .where(and(gte(payments.paidAt, from), lte(payments.paidAt, to), ownedBy(payments, userId)))
       .groupBy(sql`to_char(${payments.paidAt}, 'YYYY-MM')`, payments.currency)
       .orderBy(sql`to_char(${payments.paidAt}, 'YYYY-MM')`);
 
@@ -683,7 +776,13 @@ subscriptionRoutes.get('/analytics/summary', requireAuth, async (c) =>
         count: sql<number>`count(*)::int`,
       })
       .from(expectedBills)
-      .where(and(eq(expectedBills.status, 'expected'), isNotNull(expectedBills.plannedDate)))
+      .where(
+        and(
+          eq(expectedBills.status, 'expected'),
+          isNotNull(expectedBills.plannedDate),
+          ownedBy(expectedBills, userId),
+        ),
+      )
       .groupBy(expectedBills.currency);
 
     return c.json({

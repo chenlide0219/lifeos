@@ -5,6 +5,7 @@ import { db } from '../db/client';
 import { notificationAttempts, notificationJobs } from '../db/schema';
 import { getProviderStatuses } from '../lib/provider-status';
 import { rateLimit } from '../lib/ratelimit';
+import { ownedBy } from '../lib/scope';
 import { clientIp, requireAuth, type AppEnv } from '../middleware/auth';
 import { listProviders, refreshProviders } from '../../worker/registry';
 
@@ -60,6 +61,7 @@ notificationRoutes.post('/test', requireAuth, async (c) => {
   const [job] = await db
     .insert(notificationJobs)
     .values({
+      userId: c.get('user').id,
       ruleId: null,
       subjectType: 'system',
       subjectId: randomUUID(),
@@ -85,6 +87,7 @@ notificationRoutes.post('/test', requireAuth, async (c) => {
 
 /** 查询测试消息的真实结果（供界面轮询） */
 notificationRoutes.get('/test/:jobId', requireAuth, async (c) => {
+  const userId = c.get('user').id;
   const jobId = c.req.param('jobId');
   if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
     return c.json({ error: 'invalid_request', message: '任务 ID 格式不正确' }, 400);
@@ -102,7 +105,14 @@ notificationRoutes.get('/test/:jobId', requireAuth, async (c) => {
       sentAt: notificationJobs.sentAt,
     })
     .from(notificationJobs)
-    .where(and(eq(notificationJobs.id, jobId), eq(notificationJobs.subjectType, 'system')))
+    // 别人的测试任务与不存在的任务返回同一个 404，不泄露 id 是否存在
+    .where(
+      and(
+        eq(notificationJobs.id, jobId),
+        eq(notificationJobs.subjectType, 'system'),
+        ownedBy(notificationJobs, userId),
+      ),
+    )
     .limit(1);
 
   if (!job) return c.json({ error: 'not_found', message: '测试任务不存在' }, 404);
@@ -114,7 +124,7 @@ notificationRoutes.get('/test/:jobId', requireAuth, async (c) => {
       error: notificationAttempts.error,
     })
     .from(notificationAttempts)
-    .where(eq(notificationAttempts.jobId, jobId))
+    .where(and(eq(notificationAttempts.jobId, jobId), ownedBy(notificationAttempts, userId)))
     .orderBy(desc(notificationAttempts.attemptedAt))
     .limit(10);
 
@@ -127,6 +137,7 @@ notificationRoutes.get('/test/:jobId', requireAuth, async (c) => {
  */
 notificationRoutes.get('/jobs', requireAuth, async (c) => {
   await refreshProviders();
+  const userId = c.get('user').id;
   const statusParam = c.req.query('status');
   const requested = (statusParam ?? '')
     .split(',')
@@ -136,7 +147,11 @@ notificationRoutes.get('/jobs', requireAuth, async (c) => {
   const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 50), 1), 200);
   const offset = Math.max(Number(c.req.query('offset') ?? 0), 0);
 
-  const where = requested.length > 0 ? inArray(notificationJobs.status, requested) : undefined;
+  // 状态过滤是可选条件，账号归属是**必选**条件：两者同时成立
+  const where = and(
+    ownedBy(notificationJobs, userId),
+    requested.length > 0 ? inArray(notificationJobs.status, requested) : undefined,
+  );
 
   const rows = await db
     .select({
@@ -163,6 +178,7 @@ notificationRoutes.get('/jobs', requireAuth, async (c) => {
   const summaryRows = await db
     .select({ status: notificationJobs.status, count: sql<number>`count(*)::int` })
     .from(notificationJobs)
+    .where(ownedBy(notificationJobs, userId))
     .groupBy(notificationJobs.status);
 
   const summary: Record<string, number> = {};
@@ -184,15 +200,17 @@ notificationRoutes.get('/jobs', requireAuth, async (c) => {
 
 /** 单条任务的发送尝试明细 */
 notificationRoutes.get('/jobs/:id/attempts', requireAuth, async (c) => {
+  const userId = c.get('user').id;
   const id = c.req.param('id');
   if (!/^[0-9a-f-]{36}$/i.test(id)) {
     return c.json({ error: 'invalid_request', message: '任务 ID 格式不正确' }, 400);
   }
 
+  // 先按 ownedBy 确认任务归属：别人的任务与不存在的任务同样落到下面的 404
   const [job] = await db
     .select({ id: notificationJobs.id })
     .from(notificationJobs)
-    .where(eq(notificationJobs.id, id))
+    .where(and(eq(notificationJobs.id, id), ownedBy(notificationJobs, userId)))
     .limit(1);
 
   if (!job) {
@@ -207,7 +225,8 @@ notificationRoutes.get('/jobs/:id/attempts', requireAuth, async (c) => {
       error: notificationAttempts.error,
     })
     .from(notificationAttempts)
-    .where(and(eq(notificationAttempts.jobId, id)))
+    // 尝试记录自身也带 user_id：即便 jobId 已被上面校验过，也不留"只按 job_id 查"的写法
+    .where(and(eq(notificationAttempts.jobId, id), ownedBy(notificationAttempts, userId)))
     .orderBy(desc(notificationAttempts.attemptedAt))
     .limit(50);
 

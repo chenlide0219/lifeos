@@ -43,6 +43,24 @@ const REQUIRED_TABLES = [
   'subscriptions',
   'tasks',
   'users',
+  'wechat_accounts',
+  'wechat_inbox',
+  'wechat_operations',
+  'wechat_outbox',
+];
+
+/** 归属表：多用户隔离的基石，必须每张都有 NOT NULL 的 user_id */
+const OWNED_TABLES = [
+  'csv_import_batches',
+  'events',
+  'expected_bills',
+  'notification_attempts',
+  'notification_jobs',
+  'notification_rules',
+  'payments',
+  'subscription_price_history',
+  'subscriptions',
+  'tasks',
   'wechat_inbox',
   'wechat_operations',
   'wechat_outbox',
@@ -96,7 +114,7 @@ describe('A4 迁移可重建性', () => {
       assert.ok(tables.includes(required), `缺少必需表 ${required}`);
     }
     assert.ok(!tables.includes('admin_users'), '管理员表应已被重命名为 users');
-    assert.ok((await migrationCount()) >= 4, '4 个迁移都应记录在案');
+    assert.ok((await migrationCount()) >= 5, '5 个迁移都应记录在案');
 
     // 多用户改造后的结构断言
     for (const column of ['is_admin', 'disabled_at', 'must_change_password', 'password_changed_at']) {
@@ -105,6 +123,26 @@ describe('A4 迁移可重建性', () => {
         WHERE table_name = 'users' AND column_name = ${column}
       `);
       assert.equal(found, 1, `users.${column} 应随迁移创建`);
+    }
+
+    // 隔离的基石：13 张归属表都必须有 NOT NULL 的 user_id
+    for (const table of OWNED_TABLES) {
+      const owned = await scalar(sql`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = ${table} AND column_name = 'user_id' AND is_nullable = 'NO'
+      `);
+      assert.equal(owned, 1, `${table}.user_id 必须存在且为 NOT NULL`);
+    }
+
+    // 复合外键的引用目标唯一索引必须存在（否则迁移本身就建不起来）
+    for (const idx of [
+      'subscriptions_id_user_uq',
+      'expected_bills_id_user_uq',
+      'notification_jobs_id_user_uq',
+      'notification_rules_id_user_uq',
+    ]) {
+      const found = await scalar(sql`SELECT 1 FROM pg_indexes WHERE indexname = ${idx}`);
+      assert.equal(found, 1, `复合外键的引用目标 ${idx} 应存在`);
     }
 
     const singleton = await scalar(sql`
@@ -129,7 +167,7 @@ describe('A4 迁移可重建性', () => {
     assert.equal(await migrationCount(), before, '重复迁移不应重复应用');
   });
 
-  it('遗留库升级：admin_users 上的数据在重命名后完整保留，且既有账号成为管理员', async () => {
+  it('遗留库升级：既有数据全部保留并正确回填归属，旧全局微信绑定搬到 wechat_accounts', async () => {
     await dropEverything();
 
     // 1) 真实重建多用户改造**之前**的库结构（不经过 drizzle 记账，纯 SQL）
@@ -139,7 +177,7 @@ describe('A4 迁移可重建性', () => {
     assert.ok((await tableNames()).includes('admin_users'), '前置条件：旧库应存在 admin_users');
     assert.ok(!(await tableNames()).includes('users'), '前置条件：旧库不应存在 users');
 
-    // 2) 写入遗留数据：1 个管理员 + 它的会话 + 审计 + 一条业务数据
+    // 2) 写入覆盖各业务表的遗留数据（模拟真实生产库的样子）
     await db.execute(sql`
       INSERT INTO admin_users (username, password_hash) VALUES ('legacy-admin', 'legacy-hash')
     `);
@@ -151,17 +189,53 @@ describe('A4 迁移可重建性', () => {
       INSERT INTO audit_logs (user_id, action)
       SELECT id, 'legacy.action' FROM admin_users WHERE username = 'legacy-admin'
     `);
+    await db.execute(sql`INSERT INTO events (title, start_at) VALUES ('遗留事件', now())`);
+    await db.execute(sql`INSERT INTO tasks (title, due_date) VALUES ('遗留待办', current_date)`);
     await db.execute(sql`
-      INSERT INTO events (title, start_at) VALUES ('遗留事件', now())
+      INSERT INTO subscriptions (name, price, currency, anchor_date) VALUES ('遗留订阅', 20.00, 'CNY', current_date)
+    `);
+    await db.execute(sql`
+      INSERT INTO expected_bills (subscription_id, planned_date, amount, currency)
+      SELECT id, current_date + 30, 20.00, 'CNY' FROM subscriptions
+    `);
+    await db.execute(sql`
+      INSERT INTO payments (subscription_id, paid_at, amount, currency)
+      SELECT id, current_date, 20.00, 'CNY' FROM subscriptions
+    `);
+    await db.execute(sql`
+      INSERT INTO notification_rules (subject_type, subject_id, channel, enabled, offsets_minutes)
+      SELECT 'event', id, 'wechat', true, '[60]'::jsonb FROM events
+    `);
+    await db.execute(sql`
+      INSERT INTO notification_jobs (rule_id, subject_type, subject_id, title, body, fire_at, idempotency_key)
+      SELECT r.id, 'event', r.subject_id, '遗留提醒', '正文', now(), 'legacy-job-key'
+      FROM notification_rules r WHERE r.subject_type = 'event'
+    `);
+    await db.execute(sql`
+      INSERT INTO notification_attempts (job_id, success) SELECT id, false FROM notification_jobs
+    `);
+    await db.execute(sql`
+      INSERT INTO wechat_inbox (binding_generation, provider_message_id, from_user_id, text, parse_basis_at)
+      VALUES (gen_random_uuid(), 'legacy-msg', 'wx-user', '明天开会', now())
+    `);
+    // 改造前的全局微信绑定（密文原样，迁移不得改动它）
+    await db.execute(sql`
+      INSERT INTO settings (key, value) VALUES ('wechat.private-channel', jsonb_build_object(
+        'account', 'FAKE.SEALED.CREDENTIAL', 'context', 'FAKE.SEALED.CONTEXT', 'cursor', 'cursor-abc',
+        'generation', '11111111-1111-1111-1111-111111111111',
+        'revision', '22222222-2222-2222-2222-222222222222',
+        'boundAt', 1791776414337, 'used', 3, 'warned', true))
     `);
 
-    // 3) 执行改名迁移
+    // 3) 执行两步迁移：改名 → 数据隔离
     await applySqlFile('drizzle/0003_multi_user.sql');
+    await applySqlFile('drizzle/0004_multi_user_isolation.sql');
 
-    // 4) 断言：表已改名、行与归属关系一点没丢、既有账号被提升为管理员
+    // 4) 断言：表结构与归属关系
     const tables = await tableNames();
     assert.ok(tables.includes('users'), '应存在 users 表');
     assert.ok(!tables.includes('admin_users'), 'admin_users 应已不存在');
+    assert.ok(tables.includes('wechat_accounts'), '应存在 wechat_accounts 表');
 
     const legacy = (await db.execute(sql`
       SELECT id, username, password_hash, is_admin, must_change_password, disabled_at
@@ -170,6 +244,7 @@ describe('A4 迁移可重建性', () => {
       rows: { id: number; password_hash: string; is_admin: boolean; must_change_password: boolean; disabled_at: Date | null }[];
     };
     assert.equal(legacy.rows.length, 1, '遗留账号必须完整保留，绝不能被 DROP 掉');
+    const legacyId = legacy.rows[0]!.id;
     assert.equal(legacy.rows[0]!.password_hash, 'legacy-hash', '密码哈希不得被改写');
     assert.equal(legacy.rows[0]!.is_admin, true, '改造前的唯一账号就是管理员，必须提升');
     assert.equal(legacy.rows[0]!.must_change_password, false, '不得给既有账号强加改密要求');
@@ -183,11 +258,65 @@ describe('A4 迁移可重建性', () => {
     `);
     assert.equal(linked, 1, '审计记录必须仍然指向同一个账号');
 
-    const events = await scalar(sql`SELECT count(*)::int FROM events WHERE title = '遗留事件'`);
-    assert.equal(events, 1, '业务数据不得受影响');
+    // 每张业务表的行都还在，且归属都被回填到既有账号（而不是留 NULL 或被丢弃）
+    const owned: [string, string][] = [
+      ['events', "title = '遗留事件'"],
+      ['tasks', "title = '遗留待办'"],
+      ['subscriptions', "name = '遗留订阅'"],
+      ['expected_bills', 'true'],
+      ['payments', 'true'],
+      ['notification_rules', "subject_type = 'event'"],
+      ['notification_jobs', "idempotency_key = 'legacy-job-key'"],
+      ['wechat_inbox', "provider_message_id = 'legacy-msg'"],
+    ];
+    for (const [table, condition] of owned) {
+      const total = await scalar(sql.raw(`SELECT count(*)::int FROM ${table} WHERE ${condition}`));
+      assert.equal(total, 1, `${table} 的遗留数据必须保留`);
+      const orphan = await scalar(
+        sql.raw(`SELECT count(*)::int FROM ${table} WHERE ${condition} AND user_id <> ${legacyId}`),
+      );
+      assert.equal(orphan, 0, `${table} 的遗留数据必须归属既有账号`);
+    }
+    const attemptsLinked = await scalar(sql`
+      SELECT count(*)::int FROM notification_attempts a
+      JOIN notification_jobs j ON j.id = a.job_id WHERE j.user_id = a.user_id
+    `);
+    assert.equal(attemptsLinked, 1, '发送尝试必须与所属任务同属一个账号');
 
-    // 5) 迁移后仍然可以并存第二个账号
+    // 5) 旧全局微信绑定：密文原样搬入 wechat_accounts，旧 settings 行删除
+    const account = (await db.execute(sql`
+      SELECT user_id, generation, revision, account_enc, context_enc, cursor, used, warned
+      FROM wechat_accounts
+    `)) as unknown as {
+      rows: { user_id: number; account_enc: string; context_enc: string; cursor: string; used: number; warned: boolean }[];
+    };
+    assert.equal(account.rows.length, 1, '应恰好搬入一份微信绑定');
+    assert.equal(account.rows[0]!.user_id, legacyId, '绑定必须归既有账号');
+    assert.equal(account.rows[0]!.account_enc, 'FAKE.SEALED.CREDENTIAL', '密文必须原样搬运（SQL 迁移无法重新加密）');
+    assert.equal(account.rows[0]!.context_enc, 'FAKE.SEALED.CONTEXT');
+    assert.equal(account.rows[0]!.cursor, 'cursor-abc', '接收游标必须保留，否则会重放旧消息');
+    assert.equal(account.rows[0]!.used, 3, '发送窗口计数必须保留（否则会凭空多出额度）');
+    assert.equal(account.rows[0]!.warned, true);
+    const legacyState = await scalar(sql`SELECT count(*)::int FROM settings WHERE key = 'wechat.private-channel'`);
+    assert.equal(legacyState, 0, '旧 settings 行必须删除，避免同一份凭据在两处各留一份');
+
+    // 6) 复合外键：跨账号错配必须被数据库拒绝
     await db.execute(sql`INSERT INTO users (username, password_hash) VALUES ('second', 'x')`);
+    const secondId = (await scalar(sql`SELECT id FROM users WHERE username = 'second'`)) as number;
+    assert.notEqual(secondId, legacyId);
+
+    await assert.rejects(
+      async () => {
+        await db.execute(sql`
+          INSERT INTO expected_bills (subscription_id, user_id, planned_date, amount, currency)
+          SELECT id, ${secondId}, current_date + 99, 1.00, 'CNY' FROM subscriptions LIMIT 1
+        `);
+      },
+      /foreign key|violates/i,
+      '账单归属与订阅归属不一致时必须被数据库拒绝（这是隔离的基石）',
+    );
+
+    // 7) 迁移后仍然可以并存第二个账号
     const total = await scalar(sql`SELECT count(*)::int FROM users`);
     assert.equal(total, 2, '多账号必须能在数据库层并存');
   });
@@ -196,7 +325,7 @@ describe('A4 迁移可重建性', () => {
     const files = readdirSync('drizzle')
       .filter((f) => f.endsWith('.sql'))
       .sort();
-    assert.ok(files.length >= 4, '至少应有 init 与后续修复迁移');
+    assert.ok(files.length >= 5, '至少应有 init 与后续修复迁移');
     assert.equal(files[0], '0000_init.sql', '历史迁移文件名必须稳定，不得被重新生成覆盖');
 
     for (const f of files) {

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError, api, type SystemStatusResponse } from '../api';
+import { AccountManagement } from '../components/AccountManagement';
 import { AssistantStatus } from '../components/AssistantStatus';
 import { IconLogout } from '../components/Icons';
 import { NotificationLog } from '../components/NotificationLog';
@@ -63,7 +64,7 @@ export function SettingsPage() {
       <PageHeader title="设置" description="账户安全、外观、模型接口与通知通道状态" />
 
       <nav aria-label="设置分区" className="settings-jump">
-        <a href="#account">账户与外观</a><a href="#wechat">微信与助手</a><a href="#notifications">通知记录</a><a href="#data">数据管理</a>
+        <a href="#account">账户与外观</a>{user?.isAdmin ? <a href="#accounts">账号管理</a> : null}<a href="#wechat">微信与助手</a><a href="#notifications">通知记录</a><a href="#data">数据管理</a>
       </nav>
       <div id="account" className="grid gap-5 lg:grid-cols-2">
         <Card title="账户" subtitle={user?.username}>
@@ -199,6 +200,9 @@ export function SettingsPage() {
         </div>
       </div>
 
+      {/* 账号管理只对管理员出现。普通用户看不到入口；即便直接调接口也会被服务端 403 拒绝 */}
+      {user?.isAdmin ? <div id="accounts"><AccountManagement /></div> : null}
+
       <div id="wechat" className="mt-6"><WechatBinding onChanged={() => void api.status().then(setStatus).catch(() => undefined)} /></div>
 
       <div className="mt-4"><AssistantStatus /></div>
@@ -215,11 +219,14 @@ export function SettingsPage() {
       </Card></section>
 
       <section id="data"><Card title="数据管理" subtitle="导出与备份" className="mt-4">
+        {/* 多用户后导出只含**当前登录账号**的行，按钮文案必须说清这一点，
+            否则用户会以为拿到的是全库数据 */}
+        <p className="mb-3 text-sm text-muted">以下导出只包含<strong className="text-ink">当前账号</strong>的数据。</p>
         <div className="flex flex-wrap gap-2">
           {[
-            { href: '/api/export/subscriptions.csv', label: '导出订阅 CSV' },
-            { href: '/api/export/payments.csv', label: '导出付款 CSV' },
-            { href: '/api/export/data.json', label: '导出完整数据 JSON' },
+            { href: '/api/export/subscriptions.csv', label: '导出我的订阅 CSV' },
+            { href: '/api/export/payments.csv', label: '导出我的付款 CSV' },
+            { href: '/api/export/data.json', label: '导出我的数据 JSON' },
           ].map((item) => (
             <a key={item.href} href={item.href} download className="btn-ghost">
               {item.label}

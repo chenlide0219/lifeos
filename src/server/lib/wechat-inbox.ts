@@ -22,7 +22,8 @@ import crypto from 'node:crypto';
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { wechatInbox } from '../db/schema';
-import { seal, type WechatState } from './wechat-state';
+import { ownedBy } from './scope';
+import { seal, updateWechatState } from './wechat-state';
 
 /** 入站消息的最小结构（已从 iLink 载荷中过滤/归一化） */
 export type InboundMessage = {
@@ -66,6 +67,13 @@ export type PersistResult = {
 };
 
 export type PersistInput = {
+  /**
+   * ⚠️ 与下面的 `boundUserId` 是**两个完全不同的 id**，旁边放着极易写反：
+   *
+   * `userId: number` = **本系统的账号 id**（`users.id`）。它是归属，
+   * 会写进 `wechat_inbox.user_id`，后续所有读写都按它过滤与落库。
+   */
+  userId: number;
   generation: string;
   messages: InboundMessage[];
   /** 入站时刻；同时作为所有新消息的解析基准 */
@@ -74,12 +82,19 @@ export type PersistInput = {
   cursor: string | null;
   /** 命中有效消息时刷新的上下文 token（明文，入库前加密） */
   context: { token: string; at: Date; providerTimeMs: number } | null;
-  /** 绑定用户的用户 ID，用于过滤 */
+  /**
+   * ⚠️ 与上面的 `userId` 是**两个完全不同的 id**：
+   *
+   * `boundUserId: string` = **微信侧的账号字符串**（iLink 的 `ilink_user_id`，
+   * 即"该绑定凭据对应的微信用户"）。它只用于判断"这条消息是不是绑定用户本人发的"
+   * （过滤机器人回声与群消息），**不是归属**，也不会被写进任何 `user_id` 列。
+   * 类型分别是 string / number，写反了会被 `tsc` 拦住。
+   */
   boundUserId: string;
 };
 
 /** 单条消息的持久化结果，供上层决定是否触发处理 */
-export type PersistedMessage = { id: string; text: string; parseBasisAt: Date; operationId: string | null };
+export type PersistedMessage = { id: string; userId: number; text: string; parseBasisAt: Date; operationId: string | null };
 
 export const BODY_RETENTION_DAYS = Number(process.env.WECHAT_BODY_RETENTION_DAYS ?? 7);
 export const INBOX_LEASE_MINUTES = Number(process.env.WECHAT_INBOX_LEASE_MINUTES ?? 5);
@@ -94,27 +109,21 @@ function purgeAfterFrom(now: Date): Date {
  *
  * 只看绑定用户本人的文本消息（PRD 4.1 第 1 条：校验代际、发送人与消息类型，
  * 过滤机器人回声）；其余消息只推进游标，不入库、不触发业务。
+ *
+ * ⚠️ 这里必须走 `updateWechatState(userId, ...)`：改造前它锁的是 `settings` 里那行
+ * **全局**状态，而 `input.generation` 现在来自 `wechat_accounts` 的**每账号**代际。
+ * 两者一旦不等，事务就会直接 return，表现为"接收看起来正常但 inserted 恒为 0"——
+ * 消息被静默丢弃，是最难排查的一类故障。状态与消息必须在同一事务、同一账号行上。
  */
 export async function persistInbound(input: PersistInput): Promise<PersistResult> {
   const purgeAfter = purgeAfterFrom(input.receivedAt);
-  let inserted = 0;
-  let duplicated = 0;
 
-  await db.transaction(async (tx) => {
-    // 凭证快照与内容一并更新；游标必须与消息同事务，否则崩溃会出现
-    // "游标已推进但消息丢失"（消息永久丢失）或"消息重复但游标未动"。
-    await tx.execute(sql`
-      INSERT INTO settings(key, value) VALUES ('wechat.private-channel', '{}'::jsonb)
-      ON CONFLICT DO NOTHING
-    `);
-    const locked = await tx.execute<{ value: WechatState }>(sql`
-      SELECT value FROM settings WHERE key = 'wechat.private-channel' FOR UPDATE
-    `);
-    const state = (locked.rows?.[0]?.value ?? null) as WechatState | null;
-    if (!state) return;
-
+  return updateWechatState(input.userId, async (state, tx) => {
     // 绑定代际在轮询期间若已变化（换绑/解绑），本批消息一律丢弃
-    if (state.generation !== input.generation) return;
+    if (state.generation !== input.generation) return { inserted: 0, duplicated: 0 };
+
+    let inserted = 0;
+    let duplicated = 0;
 
     for (const message of input.messages) {
       if (message.messageType !== 1) continue;
@@ -125,6 +134,7 @@ export async function persistInbound(input: PersistInput): Promise<PersistResult
       const rows = await tx
         .insert(wechatInbox)
         .values({
+          userId: input.userId,
           bindingGeneration: input.generation,
           providerMessageId,
           fromUserId: message.fromUserId,
@@ -164,27 +174,25 @@ export async function persistInbound(input: PersistInput): Promise<PersistResult
     state.listenerAt = input.receivedAt.getTime();
     state.listenerError = null;
 
-    await tx.execute(sql`
-      UPDATE settings SET value = ${JSON.stringify(state)}::jsonb, updated_at = now()
-      WHERE key = 'wechat.private-channel'
-    `);
+    return { inserted, duplicated };
   });
-
-  return { inserted, duplicated };
 }
 
-/** 当前绑定代际；未绑定时返回 null（上层据此跳过处理） */
-export async function currentBindingGeneration(): Promise<string | null> {
-  const rows = await db.execute<{ value: WechatState }>(sql`
-    SELECT value FROM settings WHERE key = 'wechat.private-channel'
-  `);
-  const state = (rows.rows?.[0]?.value ?? null) as WechatState | null;
-  if (!state?.account) return null;
-  return state.generation ?? null;
-}
+/**
+ * 说明：这里原有 `currentBindingGeneration()`，它读的是 settings 里那行**全局**状态，
+ * 而该行已被迁移 0004 删除（绑定改为每账号一份）。它没有任何调用方，且留着就是
+ * "读一张已经不存在该数据的表"的隐患，因此删除。
+ * 需要"某账号当前绑定代际"时，用 `readWechatState(userId).generation`；
+ * 需要"全部已绑定账号"时，用 `listBoundWechatAccounts()`。
+ */
 
 export type ClaimedMessage = {
   id: string;
+  /**
+   * 归属账号：**从 inbox 行上读出的**，不是再查一遍账号推导出来的。
+   * 处理链起点拿到它之后一路显式传递，直到写 events/tasks 的 `user_id`。
+   */
+  userId: number;
   bindingGeneration: string;
   text: string;
   parseBasisAt: Date;
@@ -224,6 +232,7 @@ export async function claimInboxBatch(limit = 5, now = new Date()): Promise<Clai
     const rows = await tx
       .select({
         id: wechatInbox.id,
+        userId: wechatInbox.userId,
         bindingGeneration: wechatInbox.bindingGeneration,
         text: wechatInbox.text,
         parseBasisAt: wechatInbox.parseBasisAt,
@@ -239,8 +248,14 @@ export async function claimInboxBatch(limit = 5, now = new Date()): Promise<Clai
   });
 }
 
-/** 处理成功：终态 done，清理租约，只清正文之外的状态 */
-export async function markInboxDone(id: string, operationId: string | null = null): Promise<void> {
+/**
+ * 处理成功：终态 done，清理租约，只清正文之外的状态。
+ *
+ * `userId` 来自被处理的那条 inbox 行；这里再带上 `ownedBy` 是防御性的第二道：
+ * 即使调用方传错 id，也不可能把别人的消息改成终态（状态与计数是运营可见数据）。
+ * 参数顺序沿用约定：**账号作用域在前，被操作的行 id 在后**。
+ */
+export async function markInboxDone(userId: number, id: string, operationId: string | null = null): Promise<void> {
   await db
     .update(wechatInbox)
     .set({
@@ -251,18 +266,23 @@ export async function markInboxDone(id: string, operationId: string | null = nul
       operationId,
       processedAt: new Date(),
     })
-    .where(eq(wechatInbox.id, id));
+    .where(and(eq(wechatInbox.id, id), ownedBy(wechatInbox, userId)));
 }
 
 /**
  * 处理失败：按剩余次数退避重试，耗尽后进入 dead 终态。
  * `dead` 的消息**不会阻塞后续消息**（PRD 7.1：坏消息不能永久堵住队列）。
  */
-export async function markInboxFailed(id: string, error: string, now = new Date()): Promise<'pending' | 'dead'> {
+export async function markInboxFailed(
+  userId: number,
+  id: string,
+  error: string,
+  now = new Date(),
+): Promise<'pending' | 'dead'> {
   const [row] = await db
     .select({ attempts: wechatInbox.attempts, maxAttempts: wechatInbox.maxAttempts })
     .from(wechatInbox)
-    .where(eq(wechatInbox.id, id))
+    .where(and(eq(wechatInbox.id, id), ownedBy(wechatInbox, userId)))
     .limit(1);
   if (!row) return 'dead';
 
@@ -271,7 +291,7 @@ export async function markInboxFailed(id: string, error: string, now = new Date(
     await db
       .update(wechatInbox)
       .set({ status: 'dead', leasedUntil: null, nextAttemptAt: null, lastError: error.slice(0, 500), processedAt: now })
-      .where(eq(wechatInbox.id, id));
+      .where(and(eq(wechatInbox.id, id), ownedBy(wechatInbox, userId)));
     return 'dead';
   }
 
@@ -285,7 +305,7 @@ export async function markInboxFailed(id: string, error: string, now = new Date(
       nextAttemptAt: new Date(now.getTime() + backoffMinutes * 60_000),
       lastError: error.slice(0, 500),
     })
-    .where(eq(wechatInbox.id, id));
+    .where(and(eq(wechatInbox.id, id), ownedBy(wechatInbox, userId)));
   return 'pending';
 }
 
@@ -302,6 +322,9 @@ export async function markInboxFailed(id: string, error: string, now = new Date(
  *
  * 之所以用 `received_at` 兜底而不是只看 NULL：极旧且租约为 NULL 的行也需要被清掉，
  * 而新入库尚未领取的行状态是 `pending`，不会被这条谓词命中。
+ *
+ * ⚠️ 这是**全库维护扫描**，故意不带 `ownedBy`：它不读返回行、也不向任何账号暴露内容，
+ * 只是把"状态机卡住"这个跨账号同性质的问题统一修复（worker 每 10 分钟跑一次）。
  */
 export async function reclaimExpiredLeases(now = new Date()): Promise<number> {
   const graceCutoff = new Date(now.getTime() - INBOX_LEASE_MINUTES * 60_000);
@@ -326,6 +349,9 @@ export async function reclaimExpiredLeases(now = new Date()): Promise<number> {
 /**
  * 正文保留期清理（PRD 16.1-4）：到期只把**正文**抹掉，
  * 保留去重键、终态与操作关联，避免破坏幂等与"最近操作"核实能力。
+ *
+ * ⚠️ 与 reclaimExpiredLeases 同理，这是**全库维护扫描**，故意不带 `ownedBy`：
+ * 保留期是全局政策，按账号分批反而会让过期正文在没被扫到的账号上无限留存。
  */
 export async function purgeExpiredBodies(now = new Date()): Promise<{ inbox: number; outbox: number }> {
   const inboxRows = await db.execute(sql`
@@ -342,12 +368,20 @@ export async function purgeExpiredBodies(now = new Date()): Promise<{ inbox: num
   };
 }
 
-/** 供界面/诊断：最近入站统计 */
-export async function inboxCounts(): Promise<Record<string, number>> {
-  const rows = await db.execute<{ status: string; n: number }>(sql`
-    SELECT status, count(*)::int AS n FROM wechat_inbox GROUP BY status
-  `);
+/**
+ * 供界面/诊断：**该账号**的最近入站统计。
+ *
+ * 必须是按账号聚合：设置页展示的是"我的消息进来了没有"，
+ * 全库聚合会把别的账号的消息量回显给我（既是跨用户泄露，也让自检结论变假）。
+ */
+export async function inboxCounts(userId: number): Promise<Record<string, number>> {
+  const rows = await db
+    .select({ status: wechatInbox.status, count: sql<number>`count(*)::int` })
+    .from(wechatInbox)
+    .where(ownedBy(wechatInbox, userId))
+    .groupBy(wechatInbox.status);
+
   const out: Record<string, number> = {};
-  for (const r of rows.rows ?? []) out[r.status] = r.n;
+  for (const r of rows) out[r.status] = r.count;
   return out;
 }

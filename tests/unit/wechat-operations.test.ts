@@ -17,7 +17,9 @@ if (!new URL(process.env.DATABASE_URL).pathname.endsWith('_test')) {
 }
 
 const { db, pool } = await import('../../src/server/db/client');
-const { sql } = await import('drizzle-orm');
+const { users } = await import('../../src/server/db/schema');
+const { hashPassword } = await import('../../src/server/lib/password');
+const { eq, sql } = await import('drizzle-orm');
 const {
   commitOperation,
   createOperation,
@@ -35,6 +37,22 @@ const { wechatOutbox } = await import('../../src/server/db/schema');
 const GEN = '33333333-3333-4333-8333-333333333333';
 const INBOX = '44444444-4444-4444-8444-444444444444';
 const NOW = new Date('2026-10-12T04:00:00Z'); // 北京时间 12:00
+
+/**
+ * 归属账号 id（多用户数据隔离）：草稿、提交出的事项与提醒都按 `user_id` 归属，
+ * 而 `wechat_operations.user_id` 外键指向 `users`，因此夹具必须先有真实账号。
+ * 账号只建一次（clean() 不清理 users），避免重复运行本文件时撞唯一约束。
+ */
+let userId = 0;
+async function ensureOwner(): Promise<void> {
+  if (userId !== 0) return;
+  await db
+    .insert(users)
+    .values({ username: 'wechat-operations', passwordHash: await hashPassword('Wechat-Ops-Pass-1!') })
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, 'wechat-operations')).limit(1);
+  userId = row!.id;
+}
 
 function futureEventDraft(overrides: Partial<Draft> = {}): Draft {
   return {
@@ -58,6 +76,7 @@ async function clean(): Promise<void> {
 
 async function seed(sourceInboxId = INBOX) {
   return createOperation({
+    userId,
     bindingGeneration: GEN,
     draftKind: 'event',
     draft: futureEventDraft(),
@@ -68,7 +87,10 @@ async function seed(sourceInboxId = INBOX) {
   });
 }
 
-before(clean);
+before(async () => {
+  await ensureOwner();
+  await clean();
+});
 beforeEach(clean);
 after(async () => {
   await clean();
@@ -86,7 +108,7 @@ describe('活动草稿唯一性（数据库约束，不靠应用判断）', () =
 
   it('终态草稿不占用活动名额', async () => {
     const first = await seed(INBOX);
-    await commitOperation(first!.id, first!.version, NOW);
+    await commitOperation(userId, first!.id, first!.version, NOW);
 
     const second = await seed('66666666-6666-4666-8666-666666666666');
     assert.ok(second, '前一个已提交后应能新建草稿');
@@ -97,7 +119,7 @@ describe('活动草稿唯一性（数据库约束，不靠应用判断）', () =
     assert.ok(first);
     const again = await seed(INBOX);
     assert.equal(again, null);
-    const recent = await listRecentOperations(GEN);
+    const recent = await listRecentOperations(userId, GEN);
     assert.equal(recent.length, 1);
   });
 });
@@ -105,7 +127,7 @@ describe('活动草稿唯一性（数据库约束，不靠应用判断）', () =
 describe('原子提交', () => {
   it('一次提交同时建立事项、提醒规则、提醒任务、操作终态与回复入队', async () => {
     const op = await seed();
-    const result = await commitOperation(op!.id, op!.version, NOW);
+    const result = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(result.ok, true);
     if (!result.ok) return;
 
@@ -142,10 +164,10 @@ describe('原子提交', () => {
 
   it('重复确认返回原结果，不重复创建事项或提醒', async () => {
     const op = await seed();
-    const first = await commitOperation(op!.id, op!.version, NOW);
+    const first = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(first.ok, true);
 
-    const second = await commitOperation(op!.id, op!.version, NOW);
+    const second = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(second.ok, true);
     if (first.ok && second.ok) {
       assert.equal(second.subjectId, first.subjectId, '必须复用同一事项');
@@ -160,7 +182,7 @@ describe('原子提交', () => {
 
   it('版本不匹配拒绝提交（旧短码不能提交新草稿）', async () => {
     const op = await seed();
-    const result = await commitOperation(op!.id, op!.version + 1, NOW);
+    const result = await commitOperation(userId, op!.id, op!.version + 1, NOW);
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, /最新短码/);
 
@@ -171,12 +193,13 @@ describe('原子提交', () => {
   it('已取消的草稿不能提交', async () => {
     const op = await seed();
     await db.execute(sql`UPDATE wechat_operations SET status='cancelled' WHERE id = ${op!.id}`);
-    const result = await commitOperation(op!.id, op!.version, NOW);
+    const result = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(result.ok, false);
   });
 
   it('缺字段草稿（awaiting_fields）不能提交', async () => {
     const created = await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'event',
       draft: { ...emptyDraft('event'), title: '开会' },
@@ -186,7 +209,7 @@ describe('原子提交', () => {
       now: NOW,
     });
     assert.equal(created!.status, 'awaiting_fields');
-    const result = await commitOperation(created!.id, created!.version, NOW);
+    const result = await commitOperation(userId, created!.id, created!.version, NOW);
     assert.equal(result.ok, false);
   });
 
@@ -198,6 +221,7 @@ describe('原子提交', () => {
       startAt: new Date(NOW.getTime() + 45 * 60_000).toISOString(),
     };
     const op = await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'event',
       draft: soon,
@@ -206,7 +230,7 @@ describe('原子提交', () => {
       sourceInboxId: INBOX,
       now: NOW,
     });
-    const result = await commitOperation(op!.id, op!.version, NOW);
+    const result = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.equal(result.createdJobs, 1);
@@ -216,6 +240,7 @@ describe('原子提交', () => {
   it('无日期待办可以保存，但不生成任何提醒任务（16.1-2）', async () => {
     const task: Draft = { ...emptyDraft('task'), title: '交材料' };
     const op = await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'task',
       draft: task,
@@ -224,7 +249,7 @@ describe('原子提交', () => {
       sourceInboxId: INBOX,
       now: NOW,
     });
-    const result = await commitOperation(op!.id, op!.version, NOW);
+    const result = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.equal(result.subjectType, 'task');
@@ -236,6 +261,7 @@ describe('原子提交', () => {
 
   it('用户主动关闭提醒时不建提醒任务，规则保持关闭', async () => {
     const op = await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'event',
       draft: futureEventDraft({ reminderDeclined: true }),
@@ -244,7 +270,7 @@ describe('原子提交', () => {
       sourceInboxId: INBOX,
       now: NOW,
     });
-    const result = await commitOperation(op!.id, op!.version, NOW);
+    const result = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.equal(result.createdJobs, 0);
@@ -258,6 +284,7 @@ describe('原子提交', () => {
     // 缺开始时间的草稿
     const incomplete: Draft = { ...emptyDraft('event'), title: '开会' };
     const op = await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'event',
       draft: incomplete,
@@ -271,6 +298,7 @@ describe('原子提交', () => {
     // 补齐开始时间
     const complete: Draft = { ...incomplete, startAt: zonedToInstant(2026, 10, 14, 15, 0).toISOString() };
     const updated = await updateOperation({
+      userId,
       operationId: op!.id,
       draft: complete,
       missingFields: missingFields(complete),
@@ -283,13 +311,14 @@ describe('原子提交', () => {
     assert.deepEqual(updated!.missingFields, []);
 
     // 关键后果验证：升级后才可能提交（commitOperation 只接受 pending_confirm）
-    const result = await commitOperation(op!.id, updated!.version, NOW);
+    const result = await commitOperation(userId, op!.id, updated!.version, NOW);
     assert.equal(result.ok, true, '补全字段的草稿必须能够提交');
   });
 
   it('补丁仍缺字段时保持 awaiting_fields', async () => {
     const incomplete: Draft = { ...emptyDraft('event'), title: '开会' };
     const op = await createOperation({
+      userId,
       bindingGeneration: GEN,
       draftKind: 'event',
       draft: incomplete,
@@ -302,6 +331,7 @@ describe('原子提交', () => {
     // 只补了备注，仍然缺开始时间
     const stillMissing: Draft = { ...incomplete, note: '记得带材料' };
     const updated = await updateOperation({
+      userId,
       operationId: op!.id,
       draft: stillMissing,
       missingFields: missingFields(stillMissing),
@@ -315,20 +345,21 @@ describe('原子提交', () => {
 describe('短码、版本与到期', () => {
   it('按短码能定位活动草稿', async () => {
     const op = await seed();
-    const found = await findByShortCode(GEN, 'A7K2');
+    const found = await findByShortCode(userId, GEN, 'A7K2');
     assert.equal(found?.id, op!.id);
   });
 
   it('提交后短码不再命中（旧码失效）', async () => {
     const op = await seed();
-    await commitOperation(op!.id, op!.version, NOW);
-    assert.equal(await findByShortCode(GEN, 'A7K2'), null);
+    await commitOperation(userId, op!.id, op!.version, NOW);
+    assert.equal(await findByShortCode(userId, GEN, 'A7K2'), null);
   });
 
   it('有效修改递增版本并续期', async () => {
     const op = await seed();
     const later = new Date(NOW.getTime() + 10 * 60_000);
     const updated = await updateOperation({
+      userId,
       operationId: op!.id,
       draft: futureEventDraft({ title: '新标题' }),
       shortCode: 'F3G4',
@@ -343,10 +374,10 @@ describe('短码、版本与到期', () => {
 
   it('换绑后代际不匹配的草稿不再被读取或提交', async () => {
     const op = await seed();
-    const affected = await invalidateOperations(GEN, NOW);
+    const affected = await invalidateOperations(userId, GEN, NOW);
     assert.equal(affected, 1);
-    assert.equal(await loadActiveOperation(GEN), null);
-    const result = await commitOperation(op!.id, op!.version, NOW);
+    assert.equal(await loadActiveOperation(userId, GEN), null);
+    const result = await commitOperation(userId, op!.id, op!.version, NOW);
     assert.equal(result.ok, false);
   });
 });
@@ -355,7 +386,7 @@ describe('补丁与草稿读取', () => {
   it('补丁只改指定字段并保留其余内容', async () => {
     const op = await seed();
     const { draft } = applyPatch(op!.draft!, { title: '改名' }, NOW);
-    const updated = await updateOperation({ operationId: op!.id, draft, bumpVersion: true, now: NOW });
+    const updated = await updateOperation({ userId, operationId: op!.id, draft, bumpVersion: true, now: NOW });
     assert.equal(updated!.draft!.title, '改名');
     assert.equal(updated!.draft!.location, '科研楼', '未提供的字段必须保留');
     assert.equal(updated!.draft!.startAt, op!.draft!.startAt);

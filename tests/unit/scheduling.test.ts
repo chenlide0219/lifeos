@@ -16,7 +16,10 @@ import { requireTestDatabase } from '../helpers/guard';
 requireTestDatabase();
 
 const { db, pool } = await import('../../src/server/db/client');
-const { events, notificationJobs, notificationRules, tasks } = await import('../../src/server/db/schema');
+const { events, notificationJobs, notificationRules, tasks, users } = await import(
+  '../../src/server/db/schema'
+);
+const { hashPassword } = await import('../../src/server/lib/password');
 const {
   rebuildEventNotifications,
   rebuildTaskNotifications,
@@ -27,10 +30,30 @@ const {
 } = await import('../../src/server/lib/scheduling');
 const { zonedToInstant } = await import('../../src/server/lib/time');
 
+/**
+ * 归属账号（多用户数据隔离）。
+ *
+ * 提醒规则与提醒任务都用**复合外键**要求 `(subject_id, user_id)` 指向同一个人，
+ * 因此本文件里直接插入事项（events / tasks）的那一处必须落在同一个账号名下。
+ * 规则与任务本身由 `lib/scheduling.ts` 从事项**推导**归属，所以这里只需造一次账号：
+ * `users` 不在 beforeEach 的清理范围内，靠唯一用户名幂等，重复运行本文件也不会撞约束。
+ */
+let userId = 0;
+async function ensureOwner(): Promise<void> {
+  if (userId !== 0) return;
+  await db
+    .insert(users)
+    .values({ username: 'scheduling', passwordHash: await hashPassword('Scheduling-Pass-1!') })
+    .onConflictDoNothing({ target: users.username });
+  const [row] = await db.select({ id: users.id }).from(users).where(eq(users.username, 'scheduling')).limit(1);
+  userId = row!.id;
+}
+
 beforeEach(async () => {
   await db.execute(
     sql`TRUNCATE notification_attempts, notification_jobs, notification_rules, events, tasks RESTART IDENTITY CASCADE`,
   );
+  await ensureOwner();
 });
 
 after(async () => {
@@ -46,6 +69,7 @@ async function createEvent(opts: {
   const [row] = await db
     .insert(events)
     .values({
+      userId,
       title: opts.title ?? '课题组会议',
       startAt: opts.startAt,
       status: opts.status ?? 'active',
@@ -59,6 +83,7 @@ async function createTask(opts: { title?: string; dueDate?: string | null; dueTi
   const [row] = await db
     .insert(tasks)
     .values({
+      userId,
       title: opts.title ?? '提交报告',
       dueDate: opts.dueDate ?? null,
       dueTime: opts.dueTime ?? null,

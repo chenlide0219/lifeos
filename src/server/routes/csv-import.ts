@@ -23,6 +23,7 @@ import {
 } from '../lib/csv';
 import { ValidationError, optString, reqString } from '../lib/validate';
 import { requireAuth, type AppEnv } from '../middleware/auth';
+import { ownedBy } from '../lib/scope';
 import { guard } from './events';
 
 export const csvRoutes = new Hono<AppEnv>();
@@ -53,10 +54,19 @@ function readMapping(value: unknown, header: string[]): ColumnMapping {
   return mapping;
 }
 
-async function loadExistingPayments(): Promise<{ paidAt: string; amount: string; currency: string }[]> {
+/**
+ * 取"已有付款"用于疑似重复比对。
+ *
+ * 必须限定当前账号：去重提示会把命中记录的日期/金额回显给用户，
+ * 若比对了别人的付款，等于凭金额与日期就能推断他人账目（跨用户泄露）。
+ */
+async function loadExistingPayments(
+  userId: number,
+): Promise<{ paidAt: string; amount: string; currency: string }[]> {
   const rows = await db
     .select({ paidAt: payments.paidAt, amount: payments.amount, currency: payments.currency })
     .from(payments)
+    .where(ownedBy(payments, userId))
     .orderBy(desc(payments.paidAt))
     .limit(2000);
   return rows;
@@ -65,6 +75,7 @@ async function loadExistingPayments(): Promise<{ paidAt: string; amount: string;
 /** 只解析与检查，不落库 */
 csvRoutes.post('/preview', requireAuth, async (c) =>
   guard(c, async () => {
+    const userId = c.get('user').id;
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
@@ -87,7 +98,7 @@ csvRoutes.post('/preview', requireAuth, async (c) =>
     const defaultCurrency = (optString(body.defaultCurrency, '默认币种', 3) ?? 'CNY').toUpperCase();
 
     const normalized = normalizeRows(parsed.rows, effective, { defaultCurrency });
-    const existing = await loadExistingPayments();
+    const existing = await loadExistingPayments(userId);
     const suspicions = detectDuplicateSuspects(normalized.valid, existing);
 
     const missingRequired: string[] = [];
@@ -120,6 +131,7 @@ csvRoutes.post('/preview', requireAuth, async (c) =>
 /** 按确认后的映射导入，并记录批次 */
 csvRoutes.post('/commit', requireAuth, async (c) =>
   guard(c, async () => {
+    const userId = c.get('user').id;
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body) return c.json({ error: 'invalid_request', message: '请求体必须是 JSON' }, 400);
 
@@ -155,11 +167,13 @@ csvRoutes.post('/commit', requireAuth, async (c) =>
       const subs = await db
         .select({ id: subscriptions.id, name: subscriptions.name })
         .from(subscriptions)
-        .where(inArray(subscriptions.name, names));
+        // 同名订阅可能分属不同账号，必须只在本人订阅里找，
+        // 否则会把导入的付款挂到别人的订阅上（复合外键会直接拒绝，但错误信息不该出现）
+        .where(and(inArray(subscriptions.name, names), ownedBy(subscriptions, userId)));
       for (const s of subs) nameToId.set(s.name, s.id);
     }
 
-    const existing = await loadExistingPayments();
+    const existing = await loadExistingPayments(userId);
     const suspicions = detectDuplicateSuspects(normalized.valid, existing);
     const suspiciousLines = new Set(suspicions.map((s) => s.line));
 
@@ -168,6 +182,7 @@ csvRoutes.post('/commit', requireAuth, async (c) =>
         .insert(payments)
         .values(
           normalized.valid.map((row) => ({
+            userId,
             subscriptionId: row.subscriptionName ? (nameToId.get(row.subscriptionName) ?? null) : null,
             expectedBillId: null,
             paidAt: row.paidAt,
@@ -183,6 +198,7 @@ csvRoutes.post('/commit', requireAuth, async (c) =>
       const [batch] = await tx
         .insert(csvImportBatches)
         .values({
+          userId,
           filename,
           fileHash: hashCsv(content),
           mapping: mapping as unknown as Record<string, unknown>,
@@ -217,6 +233,7 @@ csvRoutes.post('/commit', requireAuth, async (c) =>
 /** 导入批次历史，供追溯 */
 csvRoutes.get('/batches', requireAuth, async (c) =>
   guard(c, async () => {
+    const userId = c.get('user').id;
     const rows = await db
       .select({
         id: csvImportBatches.id,
@@ -228,13 +245,14 @@ csvRoutes.get('/batches', requireAuth, async (c) =>
         createdAt: csvImportBatches.createdAt,
       })
       .from(csvImportBatches)
+      .where(ownedBy(csvImportBatches, userId))
       .orderBy(desc(csvImportBatches.createdAt))
       .limit(50);
 
     const totals = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(csvImportBatches)
-      .where(and(eq(csvImportBatches.errorRows, 0)));
+      .where(and(eq(csvImportBatches.errorRows, 0), ownedBy(csvImportBatches, userId)));
 
     return c.json({ batches: rows, cleanBatches: totals[0]?.count ?? 0 });
   }),
