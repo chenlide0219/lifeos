@@ -5,22 +5,36 @@
 # 为什么需要它：单元测试只覆盖零件（分类函数、退避、租约），
 # 而"真实 Worker 进程能否把任务领走、发出、正确落库"从未被端到端验证过。
 #
-# 用本地模拟端点充当 iLink，因此**不需要真实凭据**；
+# 用本地模拟端点充当 iLink，因此**不需要真实微信**；
 # 模拟端点严格按协议应答，并记录收到的请求供断言。
 # 全程只操作测试库，不触碰生产。
+#
+# ⚠️ 多用户改造后（2026-10-13）本脚本的夹具变了：
+#   - 发送凭据**不再来自 ILINK_* 环境变量**（那条全局兜底已被有意移除，
+#     因为一个全局凭据无法归属到任何账号）。现在必须在测试库里造一个
+#     `wechat_accounts` 行（每个账号一份绑定），Worker 只领取"该账号自己可发送"的任务。
+#   - 密文必须用**应用自己的** `seal()` 生成：手写密文格式会在加密算法或 AAD
+#     变更时静默失效（表现为"渠道看起来已配置但发不出去"）。
+#   - `notification_jobs` / `notification_attempts` 现在都有 `user_id NOT NULL`。
 #
 set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MOCK_PORT=8899
+E2E_PREFIX="e2e-notify"
 
 WORK="$(mktemp -d /tmp/lifeos-notify-e2e-XXXXXX)"
 WORKER_PID=""
 MOCK_PID=""
+TEST_URL=""
 
 cleanup() {
   [ -n "$WORKER_PID" ] && kill "$WORKER_PID" 2>/dev/null || true
   [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
+  # 清掉演练账号（含其 wechat_accounts 与提醒任务，都是 ON DELETE CASCADE）
+  if [ -n "$TEST_URL" ]; then
+    psql "$TEST_URL" -q -c "DELETE FROM users WHERE username LIKE '${E2E_PREFIX}-%'" >/dev/null 2>&1 || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -31,6 +45,10 @@ bad() { printf '  ❌ %s\n' "$*" >&2; fail=$((fail+1)); }
 
 TEST_URL="$(grep '^DATABASE_URL=' /opt/lifeos/.env 2>/dev/null | cut -d= -f2- | sed 's#/lifeos$#/lifeos_test#')"
 [ -n "$TEST_URL" ] || { echo "无法取得测试库连接串" >&2; exit 1; }
+
+# SESSION_SECRET 只在本进程内传递，绝不打印（密文要用它生成，Worker 也要用它解开）
+SESSION_SECRET_VALUE="$(grep '^SESSION_SECRET=' /opt/lifeos/.env 2>/dev/null | cut -d= -f2-)"
+[ -n "$SESSION_SECRET_VALUE" ] || { echo "无法取得 SESSION_SECRET（凭据密文需要它）" >&2; exit 1; }
 
 # ── 1. 模拟 iLink 端点 ─────────────────────────────────────────
 cat > "$WORK/mock-ilink.mjs" <<'EOF'
@@ -71,30 +89,62 @@ else
   bad "模拟端点启动失败"; cat "$WORK/mock.log" >&2; exit 1
 fi
 
-# ── 2. 造一条待发任务（直接写测试库，模拟 API 已排入队列）──────
-JOB_KEY="e2e:$(date +%s)-$RANDOM"
-psql "$TEST_URL" -q -v ON_ERROR_STOP=1 <<SQL
-TRUNCATE notification_attempts, notification_jobs RESTART IDENTITY CASCADE;
-INSERT INTO notification_jobs
-  (subject_type, subject_id, title, body, fire_at, status, idempotency_key, max_attempts)
-VALUES
-  ('system', gen_random_uuid(), '端到端演练提醒', '验证 Worker 是否真正发出', now() - interval '1 second', 'pending', '$JOB_KEY', 3);
-SQL
-ok "已排入一条待发任务"
+# ── 2. 用应用自己的 seal() 生成凭据密文 ────────────────────────
+cat > "$WORK/seal.ts" <<EOF
+import { seal } from '${REPO_ROOT}/src/server/lib/wechat-state';
+// 凭据里的 baseUrl 指向模拟端点：Worker 会用它作为该账号的发送地址
+const creds = {
+  token: 'e2e-token',
+  userId: 'e2e-recipient',
+  botId: 'e2e-bot',
+  baseUrl: 'http://127.0.0.1:${MOCK_PORT}',
+};
+process.stdout.write(JSON.stringify({ account: seal(creds), context: seal('e2e-context') }));
+EOF
 
-# ── 3. 启动真实 Worker 进程（指向测试库与模拟端点）─────────────
+if ! SEALED="$(cd "$REPO_ROOT" && SESSION_SECRET="$SESSION_SECRET_VALUE" node --import tsx "$WORK/seal.ts" 2>"$WORK/seal.err")"; then
+  bad "生成凭据密文失败（seal() 调用出错）"; cat "$WORK/seal.err" >&2; exit 1
+fi
+ACCOUNT_ENC="$(printf '%s' "$SEALED" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).account))')"
+CONTEXT_ENC="$(printf '%s' "$SEALED" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).context))')"
+[ -n "$ACCOUNT_ENC" ] && [ -n "$CONTEXT_ENC" ] && ok "已用应用的 seal() 生成凭据与上下文密文" || { bad "密文为空"; exit 1; }
+
+# ── 3. 在测试库里造一个"已绑定可发送"的账号 + 一条待发任务 ──────
+JOB_KEY="e2e:$(date +%s)-$RANDOM"
+E2E_USER="${E2E_PREFIX}-$(date +%s)"
+
+USER_ID="$(psql "$TEST_URL" -tA -v ON_ERROR_STOP=1 -c "
+  DELETE FROM users WHERE username LIKE '${E2E_PREFIX}-%';
+  INSERT INTO users (username, password_hash)
+  VALUES ('${E2E_USER}', 'e2e-not-a-real-hash')
+  RETURNING id;")"
+[ -n "$USER_ID" ] || { bad "创建演练账号失败"; exit 1; }
+
+psql "$TEST_URL" -q -v ON_ERROR_STOP=1 <<SQL
+-- 每账号一份微信绑定：有凭据 + 有上下文 + 窗口未用尽 => 可发送
+INSERT INTO wechat_accounts (user_id, generation, revision, account_enc, context_enc, cursor, used)
+VALUES ($USER_ID, gen_random_uuid(), gen_random_uuid(), '$ACCOUNT_ENC', '$CONTEXT_ENC', '', 0);
+
+INSERT INTO notification_jobs
+  (user_id, subject_type, subject_id, title, body, fire_at, status, idempotency_key, max_attempts)
+VALUES
+  ($USER_ID, 'system', gen_random_uuid(), '端到端演练提醒', '验证 Worker 是否真正发出',
+   now() - interval '1 second', 'pending', '$JOB_KEY', 3);
+SQL
+ok "已为账号 $E2E_USER（id=$USER_ID）建立绑定并排入一条待发任务"
+
+# ── 4. 启动真实 Worker 进程 ────────────────────────────────────
+# 刻意**不设** ILINK_* ：发送凭据只能来自该账号自己的 wechat_accounts 行。
+# 如果这里仍然发得出去，说明环境变量通道又回来了（那是跨账号泄露的入口）。
 cd "$REPO_ROOT"
 DATABASE_URL="$TEST_URL" \
-ILINK_TOKEN='e2e-token' \
-ILINK_TO_USER_ID='e2e-recipient' \
-ILINK_CONTEXT_TOKEN='e2e-context' \
-ILINK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
+SESSION_SECRET="$SESSION_SECRET_VALUE" \
 WORKER_POLL_MS=1000 \
 node --import tsx src/worker/index.ts > "$WORK/worker.log" 2>&1 &
 WORKER_PID=$!
-ok "已启动独立 Worker 进程（pid $WORKER_PID）"
+ok "已启动独立 Worker 进程（pid $WORKER_PID，未提供任何 ILINK_* 凭据）"
 
-# ── 4. 等待并断言 ─────────────────────────────────────────────
+# ── 5. 等待并断言 ─────────────────────────────────────────────
 status=""
 for _ in $(seq 1 30); do
   sleep 1
@@ -110,22 +160,31 @@ else
   tail -20 "$WORK/worker.log" >&2
 fi
 
-# 尝试记录必须落库
+# 尝试记录必须落库，且**归属与任务一致**（复合外键会强制这一点，这里再验一次）
 attempts="$(psql "$TEST_URL" -tA -c "SELECT count(*) FROM notification_attempts a JOIN notification_jobs j ON j.id = a.job_id WHERE j.idempotency_key = '$JOB_KEY' AND a.success")"
 [ "${attempts:-0}" -ge 1 ] && ok "已记录成功的发送尝试（$attempts 条）" || bad "未记录发送尝试"
 
-# ── 5. 断言模拟端点收到的请求符合协议 ─────────────────────────
-raw="$(curl -s --max-time 5 "http://127.0.0.1:$MOCK_PORT/_received")"
-count="$(printf '%s' "$raw" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s||"[]").length))')"
-[ "$count" = "1" ] && ok "模拟端点收到恰好 1 次请求" || bad "请求次数异常：$count"
+mismatch="$(psql "$TEST_URL" -tA -c "SELECT count(*) FROM notification_attempts a JOIN notification_jobs j ON j.id = a.job_id WHERE j.idempotency_key = '$JOB_KEY' AND a.user_id <> j.user_id")"
+[ "${mismatch:-0}" = "0" ] && ok "发送尝试的归属与任务一致" || bad "有 $mismatch 条发送尝试归属与任务不一致"
 
-printf '%s' "$raw" | node -e '
+# ── 6. 断言模拟端点收到的请求符合协议 ─────────────────────────
+raw="$(curl -s --max-time 5 "http://127.0.0.1:$MOCK_PORT/_received")"
+# 接收轮询会打 getupdates，但只有发送请求算数；按 URL 过滤后再断言
+sent_raw="$(printf '%s' "$raw" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const all = JSON.parse(s||"[]");
+  process.stdout.write(JSON.stringify(all.filter(r => r.url === "/ilink/bot/sendmessage")));
+})')"
+count="$(printf '%s' "$sent_raw" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s||"[]").length))')"
+[ "$count" = "1" ] && ok "模拟端点收到恰好 1 次发送请求" || bad "发送请求次数异常：$count"
+
+printf '%s' "$sent_raw" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   const r = JSON.parse(s||"[]")[0] ?? {};
   const checks = [
     [r.url === "/ilink/bot/sendmessage", "端点为 /ilink/bot/sendmessage"],
     [r.method === "POST", "方法为 POST"],
-    [r.authorization === "Bearer e2e-token", "带 Bearer 鉴权头"],
+    [r.authorization === "Bearer e2e-token", "带 Bearer 鉴权头（来自该账号自己的绑定）"],
     [r.authorizationType === "ilink_bot_token", "带 AuthorizationType"],
     [Boolean(r.uin), "带 X-WECHAT-UIN"],
   ];

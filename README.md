@@ -135,6 +135,64 @@ ssh lisahost "sudo systemctl restart lifeos-api lifeos-worker"
 ssh lisahost "sudo bash /opt/lifeos/deploy/verify.sh"
 ```
 
+### ⚠️ 多用户改造（0003 + 0004）的部署顺序**不能**照搬上面这一套
+
+上面那套的前提是"新代码对旧库也能跑"。**本次不成立**：0003 把 `admin_users` 改名为
+`users` 并给 13 张业务表加了 NOT NULL 的 `user_id`，因此：
+
+- **迁移之前**：新代码跑不起来（表名/列还不存在）；
+- **迁移之后**：**旧代码立刻失效**（它查的 `admin_users` 已经没了）。
+
+也就是说存在一个"两边都不兼容"的窗口，必须**先停服务再迁移**，不能像平时那样
+"先迁移、再重启"——否则这段时间里 API 会对你的手机返回 500。
+
+#### 正确的顺序
+
+```bash
+# 0. 先在**生产库的克隆**上把迁移跑一遍（只读生产，结束时自动删克隆库）
+scp drizzle/0003_multi_user.sql drizzle/0004_multi_user_isolation.sql \
+    deploy/verify-migration-on-clone.sh lisahost:/tmp/lifeos-mig/
+ssh lisahost "cd /tmp/lifeos-mig && mv 0003_multi_user.sql 0003.sql && \
+  mv 0004_multi_user_isolation.sql 0004.sql && bash verify-migration-on-clone.sh"
+#    必须 17 通过 / 0 失败 才继续。这一步能提前发现只在真实数据上才暴露的问题
+#    （例如 id 序列与数据不同步——那会让"迁移后创建第一个新账号"直接失败）。
+
+# 1. 加密备份生产库（失败就停在这里，不要继续）
+ssh lisahost "sudo bash /opt/lifeos/deploy/backup.sh"
+
+# 2. 停服务（缩短"两边都不兼容"的窗口）
+ssh lisahost "sudo systemctl stop lifeos-api lifeos-worker"
+
+# 3. 同步代码
+tar czf - --exclude=node_modules --exclude='*.env' --exclude=dist --exclude=.git . \
+  | ssh lisahost "tar xzf - -C /opt/lifeos"
+
+# 4. 依赖 + 迁移 + 构建前端（依赖没变，但 npm ci 保持习惯）
+ssh lisahost "cd /opt/lifeos && npm ci && npm run db:migrate && \
+  node scripts/generate-icons.mjs && npm run build:web"
+
+# 5. 起服务
+ssh lisahost "sudo systemctl start lifeos-api lifeos-worker"
+
+# 6. 自检（会校验迁移哈希、隔离不变量、逐账号绑定概览）
+ssh lisahost "sudo bash /opt/lifeos/deploy/verify.sh"
+
+# 7. 建第二个账号（密码经 stdin，不进命令行历史）
+ssh lisahost "cd /opt/lifeos && printf '%s\n' 'Wangliu66' | npm run create-user -- Wangliu --password-stdin"
+```
+
+#### 回滚
+
+迁移不可逆（表已改名、列已 NOT NULL），因此**唯一**的回滚方式是恢复备份：
+
+```bash
+ssh lisahost "sudo bash /opt/lifeos/deploy/restore-test.sh"   # 先在 _test 库演练
+# 确认备份可用后，按 deploy/backup.sh 的说明用备份覆盖生产库，再检出上一个 tag：
+#   git checkout pre-multiuser-20261012
+```
+
+所以第 1 步的备份不是形式：**没有它就没有退路**。
+
 ### ⚠️ 服务器 `.env` 的配置项必须在部署时人工确认
 
 `.env` **不随代码同步**，因此**新增配置项很容易漏掉**，而漏掉往往是静默的。
