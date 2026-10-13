@@ -167,7 +167,7 @@ describe('A4 迁移可重建性', () => {
     assert.equal(await migrationCount(), before, '重复迁移不应重复应用');
   });
 
-  it('遗留库升级：既有数据全部保留并正确回填归属，旧全局微信绑定搬到 wechat_accounts', async () => {
+  it('遗留库升级：既有数据保留并回填归属、微信绑定搬迁、id 序列被校正', async () => {
     await dropEverything();
 
     // 1) 真实重建多用户改造**之前**的库结构（不经过 drizzle 记账，纯 SQL）
@@ -178,8 +178,15 @@ describe('A4 迁移可重建性', () => {
     assert.ok(!(await tableNames()).includes('users'), '前置条件：旧库不应存在 users');
 
     // 2) 写入覆盖各业务表的遗留数据（模拟真实生产库的样子）
+    //
+    // ⚠️ 刻意**带显式 id** 插入遗留账号：生产库就是这样产生的，其结果是
+    // `admin_users_id_seq` 停在初始状态（last_value=1、is_called=false），
+    // 而 id=1 已被占用。如果迁移不校正序列，改名后的第一次 nextval 仍返回 1
+    // → 撞唯一约束 → "迁移后创建第一个新账号必失败"。
+    // 下面的第 6 步会真的去插入一个新账号，因此这条路径被真实覆盖；
+    // 请不要把这里的显式 id 去掉（去掉就等于放弃这条回归）。
     await db.execute(sql`
-      INSERT INTO admin_users (username, password_hash) VALUES ('legacy-admin', 'legacy-hash')
+      INSERT INTO admin_users (id, username, password_hash) VALUES (1, 'legacy-admin', 'legacy-hash')
     `);
     await db.execute(sql`
       INSERT INTO sessions (user_id, token_hash, expires_at)
@@ -300,10 +307,13 @@ describe('A4 迁移可重建性', () => {
     const legacyState = await scalar(sql`SELECT count(*)::int FROM settings WHERE key = 'wechat.private-channel'`);
     assert.equal(legacyState, 0, '旧 settings 行必须删除，避免同一份凭据在两处各留一份');
 
-    // 6) 复合外键：跨账号错配必须被数据库拒绝
+    // 6) 复合外键：跨账号错配必须被数据库拒绝。
+    // 顺带覆盖"迁移后能建新账号"——遗留账号占用了 id=1 且序列从未推进，
+    // 只有迁移收尾校正了序列，这一句才不会撞 users_pkey。
     await db.execute(sql`INSERT INTO users (username, password_hash) VALUES ('second', 'x')`);
     const secondId = (await scalar(sql`SELECT id FROM users WHERE username = 'second'`)) as number;
-    assert.notEqual(secondId, legacyId);
+    assert.notEqual(secondId, legacyId, '新账号必须拿到未被占用的 id（序列必须已被校正）');
+    assert.ok(secondId > legacyId, '新账号的 id 应大于既有账号');
 
     await assert.rejects(
       async () => {

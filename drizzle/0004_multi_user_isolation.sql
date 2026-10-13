@@ -198,3 +198,31 @@ CREATE INDEX "tasks_user_due_idx" ON "tasks" USING btree ("user_id","due_date");
 CREATE INDEX "wechat_inbox_user_claim_idx" ON "wechat_inbox" USING btree ("user_id","status","next_attempt_at");--> statement-breakpoint
 CREATE INDEX "wechat_operations_user_idx" ON "wechat_operations" USING btree ("user_id","created_at");--> statement-breakpoint
 CREATE INDEX "wechat_outbox_user_claim_idx" ON "wechat_outbox" USING btree ("user_id","status","next_attempt_at");
+
+-- ── 10) 校正 id 序列与既有数据的同步（真实生产数据上才会暴露的问题）──────────
+--
+-- 生产库上 `admin_users_id_seq` 处于**初始状态**（last_value=1、is_called=false），
+-- 而 admin 已经占用了 id=1（说明当初是带显式 id 写入的）。序列从未被推进过。
+-- 0003 把这个序列重命名为 users_id_seq 之后，**第一次 nextval 仍然返回 1** → 撞上
+-- admin 的唯一约束 → 报 `duplicate key value violates unique constraint "users_pkey"`。
+-- 具体后果就是：迁移一完成，"创建 Wangliu"这一步直接失败（而且第一次失败后序列才推进，
+-- 第二次才成功——属于最难排查的"重试一下就好了"型故障）。
+--
+-- 因此迁移的收尾必须把每个 serial 序列推到 `max(id)`：位置按 is_called 语义设置，
+-- 保证"表为空时下一个 id 是 1、表非空时下一个 id 是 max+1"，且本语句可重复执行。
+SELECT setval(
+  pg_get_serial_sequence('users', 'id'),
+  GREATEST(COALESCE((SELECT max(id) FROM users), 0), 1),
+  (SELECT max(id) FROM users) IS NOT NULL
+);--> statement-breakpoint
+-- 另外两张 serial 主键表一并校正（同属"序列与数据不同步"这一类隐患，代价极低）
+SELECT setval(
+  pg_get_serial_sequence('audit_logs', 'id'),
+  GREATEST(COALESCE((SELECT max(id) FROM audit_logs), 0), 1),
+  (SELECT max(id) FROM audit_logs) IS NOT NULL
+);--> statement-breakpoint
+SELECT setval(
+  pg_get_serial_sequence('notification_attempts', 'id'),
+  GREATEST(COALESCE((SELECT max(id) FROM notification_attempts), 0), 1),
+  (SELECT max(id) FROM notification_attempts) IS NOT NULL
+);
